@@ -81,6 +81,7 @@ def write_shard(
     *,
     drop_json_for: set[int] | None = None,
     corrupt_hash_for: set[int] | None = None,
+    corrupt_image_for: set[int] | None = None,
     duplicate_key: bool = False,
 ) -> Path:
     """Write one shard triple into `directory` and return that directory.
@@ -88,12 +89,14 @@ def write_shard(
     The keyword flags exist so tests can construct specific defects:
       drop_json_for     omit the metadata sidecar for those sample indices
       corrupt_hash_for  record a sha256 that does not match the bytes
+      corrupt_image_for write bytes that are not a decodable image
       duplicate_key     emit two samples under the same key
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     drop_json_for = drop_json_for or set()
     corrupt_hash_for = corrupt_hash_for or set()
+    corrupt_image_for = corrupt_image_for or set()
 
     names = shard.shard_filenames(shard_index)
 
@@ -106,7 +109,12 @@ def write_shard(
 
         for i in range(n_samples):
             key = sample_key(shard_index, i)
-            image = make_jpeg(i)
+            if i in corrupt_image_for:
+                # Not a JPEG. Structural checks still pass, so this isolates
+                # decode failure from a malformed shard.
+                image = b"this is not an image"
+            else:
+                image = make_jpeg(i)
             digest = hashlib.sha256(image).hexdigest()
             if i in corrupt_hash_for:
                 digest = "0" * 64
