@@ -1,6 +1,6 @@
 # Experiment 0002: Download concurrency within a single node
 
-Status: pre-registered, not yet run
+Status: **run 2026-08-13. Not rejected — but 64 processes is worse than 32.**
 Date: 2026-08-13
 Time budget: 2.5 hours (agreed upper bound)
 
@@ -261,4 +261,97 @@ thresholds than the ones registered here.
 
 ## Result
 
-Not yet run.
+Run 2026-08-13 on one node of the reservation, task-000674, 200,000 URLs per
+level. Job wall time 01:38:01, exit 0.
+
+| Run | Proc | Wall s | Candidates | Successes | Yield | Succ/s | DNS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 8 | 2063 | 200,000 | 129,929 | 65.0% | 63.0 | 6.1% |
+| 2 | 32 | 692 | 200,000 | 129,201 | 64.6% | **186.7** | 6.1% |
+| 3 | 64 | 994 | 200,000 | 127,456 | 63.7% | 128.2 | 6.1% |
+| 4 | 8 | 2122 | 200,000 | 128,830 | 64.4% | 60.7 | 6.2% |
+
+### Against the registered criteria: NOT REJECTED
+
+- **Throughput 8 → 32: 2.96×**, against a 1.5× threshold.
+- **Yield preserved.** 65.0% → 64.6% → 63.7% → 64.4%; largest drop 1.3 pp
+  against a 5 pp threshold.
+- **DNS stable.** 6.1%, 6.1%, 6.1%, 6.2% — flat to within a tenth of a point
+  across an eightfold change in concurrency.
+- **Baseline stable.** The two 8-process runs differ by 3.6%, against a 20%
+  threshold. Nothing below 3.6% is attributable to concurrency.
+
+### 64 processes is worse than 32, by a margin far above the noise
+
+This was a registered level, so it is a result rather than an afterthought,
+but it is not what the hypothesis predicted.
+
+| Comparison | Ratio |
+|---|---|
+| 8 → 32 | 2.96× |
+| 32 → 64 | **0.69×** (a 31% loss) |
+| 8 → 64 | 2.03× |
+
+The 31% gap is nearly nine times the 3.6% drift floor, so it is not noise.
+
+Per-process efficiency shows the same thing from the other side: 7.88
+successes/sec per process at 8, 5.83 at 32 (74% of the 8-process rate), and
+2.00 at 64 (25%).
+
+**The failure breakdown identifies the mechanism.** Transient failures —
+timeouts, 5xx, 429 — rise sharply only at 64:
+
+| Run | Permanent | Transient | Other |
+|---|---:|---:|---:|
+| 1 (8) | 20.5% | 3.1% | 5.3% |
+| 2 (32) | 20.6% | 3.7% | 5.1% |
+| 3 (64) | 18.7% | **5.9%** | 5.5% |
+| 4 (8) | 21.1% | 3.2% | 5.1% |
+
+At 64 processes — 2,048 concurrent connections — requests start timing out
+and being refused. Those attempts consume time and return nothing, which is
+exactly the shape of the throughput loss. Permanent failures fall at the same
+time because attempts that would have returned a clean 404 are instead
+timing out.
+
+**Operationally: run 32 processes per node.** Not the inherited 8, and not
+64. The optimum is somewhere at or below 64 and above 8; three points locate
+a direction, not a maximum.
+
+### The absolute rate is 3.5× below what the earlier figure implied
+
+Unexplained, and it matters more than the ratio does.
+
+`measurements.md` recorded 27.9 successes/sec per process, from one shard of
+task-000688. This run measured **7.88** at the same process count — 3.5×
+slower. Candidate explanations, none tested:
+
+- **Different task.** 000674 here, 000688 there. URL composition differs
+  between tasks by enough to change per-image size threefold (G2), so it can
+  plausibly change host latency too.
+- **Cluster load.** The reservation was ~100% occupied during this run;
+  `nodestatus` reported 0 vacant nodes out of 766. The earlier figure has no
+  recorded load context.
+- **Shard size.** 1,000 samples here against 10,000 in production. Per-shard
+  overhead is higher, though the arithmetic does not obviously account for a
+  3.5× gap.
+
+The consequence is on the schedule, not on this experiment's conclusion —
+every level here shares the same conditions, so the comparison holds.
+
+### What this means for the remaining work
+
+Extrapolating from the measured rates: 735 tasks × 1,000,000 URLs at 64.5%
+yield is roughly 474 million images.
+
+| Per-node setting | Days on one node |
+|---|---:|
+| 8 processes (inherited) | 87 |
+| **32 processes** | **29** |
+| 64 processes | 43 |
+| 8 processes, at the old 223/s figure | 25 |
+
+Moving from 8 to 32 processes takes it from about three months to about a
+month on one node. **That is not enough on its own**, which makes experiment
+0003 — whether nodes can be added without penalty — the deciding measurement
+rather than a nice-to-have.
