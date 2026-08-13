@@ -69,21 +69,29 @@ def read_urls(source: Path, at_least: int | None = None) -> tuple[pa.Table, str]
     return table, choose_url_column(table.column_names)
 
 
-def slice_table(table: pa.Table, count: int, n_slices: int) -> list[pa.Table]:
-    """Disjoint consecutive slices of `count` rows each.
+def slice_table(
+    table: pa.Table, count: int, n_slices: int, offset: int = 0
+) -> list[pa.Table]:
+    """Disjoint consecutive slices of `count` rows each, starting at `offset`.
 
     Refuses a short final slice. A level with fewer URLs than the others is
     not comparable to them, so a partial experiment would spend a reserved
     node to produce numbers that answer nothing.
+
+    `offset` lets a later phase start where an earlier one stopped, so that
+    phases of the same experiment never share URLs — otherwise one phase
+    warms remote caches for the next and the difference between them
+    includes that.
     """
-    needed = count * n_slices
+    needed = offset + count * n_slices
     if table.num_rows < needed:
-        workable = table.num_rows // n_slices
+        workable = max(0, (table.num_rows - offset)) // n_slices
         raise UrlListFormatError(
             f"{table.num_rows} rows is not enough for {n_slices} slices of "
-            f"{count} ({needed} needed). Largest workable count is {workable}."
+            f"{count} starting at row {offset} ({needed} needed). "
+            f"Largest workable count is {workable}."
         )
-    return [table.slice(i * count, count) for i in range(n_slices)]
+    return [table.slice(offset + i * count, count) for i in range(n_slices)]
 
 
 @dataclass(frozen=True)
