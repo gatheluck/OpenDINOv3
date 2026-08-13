@@ -82,18 +82,16 @@ def server(tmp_path_factory):
         proc.wait(timeout=10)
 
 
-@pytest.fixture(scope="module")
-def job_run(server, tmp_path_factory):
-    """Run the real job script once; every test reads its output."""
-    base = tmp_path_factory.mktemp("job0003")
+def run_job(server, base):
+    """Run the real job script against a tree rooted at `base`."""
     urls_dir = base / "urls"
-    urls_dir.mkdir()
+    urls_dir.mkdir(exist_ok=True)
     pq.write_table(
         pa.table({"url": [f"{server}/{i:04d}.jpg" for i in range(IMAGES)]}),
         urls_dir / "urls_clean.parquet",
     )
     exp_out = base / "out"
-    exp_out.mkdir()
+    exp_out.mkdir(exist_ok=True)
 
     env = {
         **os.environ,
@@ -110,11 +108,17 @@ def job_run(server, tmp_path_factory):
         "PBS_LOCALDIR": str(base / "local"),
     }
     (base / "fake.sif").write_bytes(b"")
-    (base / "local").mkdir()
+    (base / "local").mkdir(exist_ok=True)
 
     result = subprocess.run(["bash", str(JOB)], capture_output=True, text=True,
                             env=env)
     return result, exp_out
+
+
+@pytest.fixture(scope="module")
+def job_run(server, tmp_path_factory):
+    """Run the real job script once; every test reads its output."""
+    return run_job(server, tmp_path_factory.mktemp("job0003"))
 
 
 def test_the_job_reports_success_only_when_it_produced_something(job_run) -> None:
@@ -174,3 +178,40 @@ def test_the_analysis_reads_the_job_output_back(job_run) -> None:
     assert result.returncode == 0, result.stderr
     assert "pre-registered criteria" in result.stdout
     assert "NOT RUN" not in result.stdout, "every phase ran; none should be absent"
+
+
+def test_a_second_run_into_the_same_directory_works_and_does_not_mix(
+    server, tmp_path_factory
+) -> None:
+    """The failure mode of attempt 2: leftovers from attempt 1.
+
+    Two things had to hold and neither did. Staging must overwrite what the
+    last run left — `cp` refuses to write onto a symlink pointing at the
+    source — and the analysis must not sum shards from two different runs
+    and call the total one measurement.
+    """
+    base = tmp_path_factory.mktemp("job0003_rerun")
+
+    first, exp_out = run_job(server, base)
+    assert first.returncode == 0, first.stdout + first.stderr
+    first_shards = len(list(exp_out.rglob("*_stats.json")))
+    assert first_shards > 0
+
+    second, exp_out_again = run_job(server, base)
+    assert exp_out_again == exp_out
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "are the same file" not in second.stderr
+    assert "moved to previous_" in second.stdout, \
+        "the previous attempt should have been set aside"
+
+    # The archive holds attempt 1; the live phase dirs hold only attempt 2.
+    archived = list(exp_out.glob("previous_*"))
+    assert archived, "nothing was archived"
+    assert len(list(archived[0].rglob("*_stats.json"))) == first_shards
+
+    live = [p for p in exp_out.glob("phase*") for _ in [0]]
+    live_shards = sum(len(list(d.rglob("*_stats.json"))) for d in live)
+    assert live_shards == first_shards, (
+        f"the second run has {live_shards} shards but attempt 1 wrote "
+        f"{first_shards}; runs are being mixed"
+    )

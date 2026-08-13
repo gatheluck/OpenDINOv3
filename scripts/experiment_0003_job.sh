@@ -56,6 +56,35 @@ echo
 SCRATCH="${PBS_LOCALDIR:-/tmp}/od_exp0003"
 mkdir -p "${SCRATCH}/cache" "${OD_EXP_OUT}"
 
+# --- a re-run must not mix with the last one --------------------------------
+#
+# The output directory survives between attempts. Leftovers cost two runs:
+# first a stale symlink that staging could not overwrite, and more seriously
+# the analysis would happily sum shards from two different runs and report
+# the total as one measurement.
+#
+# Moved aside, not deleted — a previous attempt may hold the only copy of
+# something worth reading.
+archive_previous() {
+  local dest="${OD_EXP_OUT}/previous_${PBS_JOBID:-manual}" n=1 item found=0
+  for item in "${OD_EXP_OUT}"/phase* "${OD_EXP_OUT}"/slices_p*; do
+    [ -e "${item}" ] && { found=1; break; }
+  done
+  [ "${found}" -eq 1 ] || return 0
+
+  while [ -e "${dest}" ]; do
+    dest="${OD_EXP_OUT}/previous_${PBS_JOBID:-manual}_${n}"; n=$((n + 1))
+  done
+  mkdir -p "${dest}" || return 1
+  for item in "${OD_EXP_OUT}"/phase* "${OD_EXP_OUT}"/slices_p*; do
+    [ -e "${item}" ] || continue
+    mv "${item}" "${dest}/" || return 1
+  done
+  echo "⚠️  output directory was not empty; previous attempt moved to ${dest##*/}"
+  return 0
+}
+archive_previous || { echo "❌ cannot set aside the previous attempt" >&2; exit 1; }
+
 if [ -d "${OD_URLS}" ]; then
   URL_BIND="${OD_URLS}"; URL_PATH="/urls"
 else
@@ -135,8 +164,14 @@ EOF
 
 run_phase_single() {   # $1 phase  $2 slice file  $3 processes
   local phase="$1" script t0 t1
-  script="$(write_node_script "${phase}" 0 "$2" "$3")"
   echo "── ${phase}: 1 node × $3 processes"
+  # Without this the phase ran `bash ""`, printed "wall 0 s", and looked like
+  # it had happened.
+  if ! script="$(write_node_script "${phase}" 0 "$2" "$3")" || [ -z "${script}" ]
+  then
+    echo "❌ ${phase}: could not stage the slice; phase not run" >&2
+    return 1
+  fi
   t0=$(date +%s); bash "${script}"; t1=$(date +%s)
   printf '%s\n' "$((t1 - t0))" > "${OD_EXP_OUT}/${phase}/wall_seconds"
   echo "   wall $((t1 - t0)) s"
@@ -177,7 +212,12 @@ run_phase_multi() {   # $1 phase  $2 processes-per-node
 
   t0=$(date +%s)
   for k in $(seq 0 $((OD_NODES - 1))); do
-    script="$(write_node_script "${phase}" "${k}" "slices_p2/slice_$((k + 1)).parquet" "${procs}")"
+    if ! script="$(write_node_script "${phase}" "${k}" \
+                     "slices_p2/slice_$((k + 1)).parquet" "${procs}")" \
+       || [ -z "${script}" ]; then
+      echo "❌ ${phase}: could not stage node${k}; phase not run" >&2
+      return 1
+    fi
     if [ "${k}" -eq 0 ]; then
       bash "${script}" & pids+=($!)
     elif [ "${launcher}" = "pbsdsh" ]; then
@@ -209,7 +249,10 @@ echo "home after : $(df -h "${HOME}" 2>/dev/null | tail -1)"
 # The previous run exited 0 having produced no shards at all, so qstat
 # reported success for a job that measured nothing. Count what was written
 # and let the exit status say so.
-SHARDS=$(find "${OD_EXP_OUT}" -name '*_stats.json' 2>/dev/null | wc -l | tr -d ' ')
+# Only this run's phases. Counting the whole tree would include anything
+# archive_previous set aside and report a failed run as a success.
+SHARDS=$(find "${OD_EXP_OUT}"/phase* -name '*_stats.json' 2>/dev/null \
+         | wc -l | tr -d ' ')
 echo "shards written: ${SHARDS}"
 if [ "${SHARDS}" -eq 0 ]; then
   echo "❌ no shard was written by any phase. The job did nothing." >&2
