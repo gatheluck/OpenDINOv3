@@ -46,14 +46,21 @@ mkdir -p "${SCRATCH}/cache"
 SLICE_DIR="${OD_EXP_OUT}/slices"
 mkdir -p "${SLICE_DIR}"
 
-URL_DIR="${OD_URLS%/*}"
-URL_NAME="${OD_URLS##*/}"
+# OD_URLS may be one list or a directory of them, so bind whichever it is and
+# hand the slicer the matching path inside the container.
+if [ -d "${OD_URLS}" ]; then
+  URL_BIND="${OD_URLS}"
+  URL_PATH="/urls"
+else
+  URL_BIND="${OD_URLS%/*}"
+  URL_PATH="/urls/${OD_URLS##*/}"
+fi
 
-LEVEL_COUNT=$(printf '%s\n' ${OD_LEVELS} | wc -l)
+LEVEL_COUNT=$(printf '%s\n' ${OD_LEVELS} | wc -l | tr -d ' ')
 
 bind_args=(
   --bind "${OD_REPO}:/work:ro"
-  --bind "${URL_DIR}:/urls:ro"
+  --bind "${URL_BIND}:/urls:ro"
   --bind "${OD_EXP_OUT}:/out"
   --bind "${SCRATCH}:/scratch"
 )
@@ -68,7 +75,7 @@ echo
 
 singularity exec "${bind_args[@]}" "${env_args[@]}" "${OD_SIF}" \
   python /work/scripts/slice_urls.py \
-    "/urls/${URL_NAME}" /out/slices \
+    "${URL_PATH}" /out/slices \
     --count "${OD_SLICE}" --slices "${LEVEL_COUNT}"
 rc=$?
 

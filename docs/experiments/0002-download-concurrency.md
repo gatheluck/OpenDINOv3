@@ -98,24 +98,39 @@ choice safe here.
 
 ### The slices are cut before any run starts
 
-Slices are URL positions, not line numbers, and all four are cut in one pass
-over the source list.
+Slices are URL positions, and all four are cut in one pass over the source
+before the first download begins.
 
-The source was written by someone else. A file named `.tsv` may hold one URL
-per line or columns with a header, and the URL column is not reliably first.
-Handing tab-separated rows to img2dataset is not a visible error: it accepts
-them, fails to fetch every one, and reports a yield near zero that looks like
-a finding. So the format is detected once, and input whose layout cannot be
-determined — a headerless multi-column file, or parquet — is refused rather
-than guessed at.
+The corpus stores its URL lists as parquet — `urls_clean.parquet`, one per
+task. img2dataset reads parquet natively given `--url_col`, so the slices are
+written back as parquet with every column preserved and the runs use the same
+input path production uses. Converting to text would put the experiment on a
+code path production never exercises.
 
-Cutting all slices up front also means the header is interpreted exactly
-once. Re-running detection per slice would treat a URL as a header in every
-slice after the first.
+The URL column is found by name and the list is refused if no known name is
+present. A positional guess would work on whatever sample it was tried
+against and fail on the corpus. This matters more than it sounds: img2dataset
+accepts any string as a URL, so guessing wrong is not an error — it is a run
+that fails every fetch and reports a yield near zero that looks like a
+finding.
 
-If the list is too short to fill every slice, the run does not start. A level
-with a short slice is not comparable to the others, so a partial experiment
-would spend the reservation slot to answer nothing.
+Text lists are still supported for hand-made inputs, with the same rule: one
+URL per line, or tab-separated with a header naming the URL column, and
+refused otherwise.
+
+If the source is too short to fill every slice, the run does not start. A
+level with a short slice is not comparable to the others, so a partial
+experiment would spend the reservation slot to answer nothing. `OD_URLS` may
+name a directory, in which case task lists are concatenated in sorted order
+until there are enough rows.
+
+### Which task list to draw from
+
+A task under `raw_shards`, not one under `dns_recovery`.
+
+`dns_recovery` holds URLs that already failed DNS once. Their failure profile
+is not the corpus's, so throughput and yield measured on them would not
+transfer to production. The submit script warns when pointed at one.
 
 ### Node count is not varied
 
@@ -178,8 +193,14 @@ bash scripts/submit_experiment_0002.sh --dry-run
 bash scripts/submit_experiment_0002.sh
 ```
 
-`OD_URLS` must point at a text URL list. If it is unset, the submit script
-lists candidates under `OD_ROOT` rather than guessing one.
+`OD_URLS` points at a task's `urls_clean.parquet`, a text list, or a
+directory of either. If it is unset, the submit script lists candidates under
+`OD_ROOT` rather than guessing one.
+
+Before submitting, the script reads the source's parquet metadata through the
+container and reports the row count, the schema and the detected URL column.
+A wrong schema or too few rows stops it there, rather than a minute into a
+reserved node after the queue wait.
 
 When the job finishes:
 
