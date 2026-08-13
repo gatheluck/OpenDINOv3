@@ -51,7 +51,12 @@ Three kinds, deliberately separated:
 Experiments are **not tests**. They are non-deterministic and confounded, so
 they are pre-registered — question, hypothesis, falsification criteria,
 confounders, and what the measurement *cannot* answer — before being run.
-They never run in CI.
+They never run in CI. Protocols live in [docs/experiments/](docs/experiments/).
+
+Writing the confounders down first is not ceremony. Two measurements in this
+project were built in a way that could not answer the question asked of them,
+and in both cases the flaw was one that listing confounders beforehand would
+have exposed.
 
 Fixtures are **synthetic**. Downloaded images are third-party content, so
 real samples cannot live in a public repository. Tests generate data with the
@@ -112,6 +117,8 @@ scripts/install_hooks.sh    Hook installer
 tests/                      Unit, contract and architecture tests
 tests/fixtures/             Synthetic shard generator (no third-party data)
 docs/adr/                   Architecture decision records
+docs/experiments/           Pre-registered measurement protocols
+scripts/                    Runners (benchmarks, hooks)
 .github/workflows/          CI
 ```
 
