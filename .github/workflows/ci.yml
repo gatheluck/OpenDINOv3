@@ -1,0 +1,98 @@
+name: ci
+
+# One workflow, one image build, every check.
+#
+# This replaces three separate workflows (guard, test, image). Each of them
+# triggered on both push and pull_request, so a single push to a PR branch
+# started six runs and built the same image three times. They queued behind
+# each other and told us nothing extra.
+#
+# The image is built once here and reused by every subsequent step, which is
+# also the honest thing to do: the checks then apply to one artifact rather
+# than to three separately built ones.
+
+on:
+  push:
+    # Branch pushes are covered by the pull_request trigger. Restricting to
+    # main avoids running the whole suite twice for the same commit.
+    branches: [main]
+  pull_request:
+
+# Superseded runs are pointless: only the newest commit on a branch matters.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheapest check first: it needs no image and catches the one mistake
+      # that cannot be undone once pushed.
+      - name: No site-specific identifiers
+        run: bash check_no_identifiers.sh
+
+      - name: Build runtime image
+        run: docker build -t opendinov3:test .
+
+      - name: Unit and contract tests
+        # Run inside the image, not on the bare runner. The point of one image
+        # for local, CI and cluster is that all three agree; testing against a
+        # different interpreter or different wheels gives that up.
+        run: |
+          docker run --rm -v "${PWD}:/w" -w /w opendinov3:test \
+            python -m pytest -p no:cacheprovider --tb=short
+
+      - name: Runtime contract under Singularity-like constraints
+        # Emulates the cluster's container runtime with Docker flags:
+        # unmapped UID, read-only root, non-writable HOME, no network on
+        # import. These are the differences that break images tested only
+        # with a plain `docker run`.
+        run: bash tests/test_container_runtime.sh opendinov3:test
+
+      # ---- Publish: only for merges to the default branch ----------------
+      # Pull requests build and verify but never publish, so a proposed change
+      # cannot alter what the cluster would pull.
+
+      - name: Log in to registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish image
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          repo=$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          target="${REGISTRY}/${repo}"
+
+          docker tag opendinov3:test "${target}:latest"
+          docker tag opendinov3:test "${target}:${GITHUB_SHA}"
+          docker push --quiet "${target}:latest"
+          docker push --quiet "${target}:${GITHUB_SHA}"
+
+          # Production runs pin by digest. A tag can be moved; a digest cannot,
+          # so the digest is what makes "the artifact CI tested is the artifact
+          # that runs" verifiable rather than merely intended.
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' \
+                   "${target}:${GITHUB_SHA}")
+          {
+            echo "### Image published"
+            echo ""
+            echo "Pull on the cluster, pinned by digest:"
+            echo ""
+            echo '```bash'
+            echo "singularity pull opendinov3.sif docker://${digest}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
