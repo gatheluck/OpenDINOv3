@@ -1,0 +1,21 @@
+# Direct dependencies, deliberately minimal.
+#
+# Only what the pipeline actually needs is listed here; transitive packages are
+# resolved and recorded in requirements.lock. The reference environment on the
+# cluster carried extras (albumentations, datasets, boto3) that this pipeline
+# does not use, so they are not carried over.
+#
+# img2dataset is pinned exactly: its CLI flags and output layout define the
+# shard format, so an upgrade is a breaking change to the data contract.
+img2dataset==1.47.0
+
+# Pillow is NOT a dependency of img2dataset 1.47.0, which decodes with OpenCV.
+# It is listed here as a direct dependency because the WebDataset decoders used
+# for shard validation and for the training dataloader go through PIL.
+# The contract test caught its absence; leaving it implicit would have failed
+# later, in Phase 1.
+pillow
+
+# Test runner. Kept in the runtime image on purpose so the image can verify
+# itself, both in CI and on the cluster before a production run.
+pytest==8.4.2
