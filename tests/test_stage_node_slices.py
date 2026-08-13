@@ -116,6 +116,36 @@ def test_each_node_gets_its_own_slice(tmp_path) -> None:
         == b"PAR1second"
 
 
+def test_staging_over_a_previous_run_s_leftovers(tmp_path) -> None:
+    """A re-run finds the last run's files still in place.
+
+    The first fix replaced a symlink with a copy, but `cp` refuses to write a
+    file onto a symlink that points back at the source:
+
+        cp: '.../slices_p1/slice_1.parquet' and
+            '.../phase1_single/node0/slices/slice_1.parquet' are the same file
+
+    Every phase of the second attempt failed on this, so the job again
+    measured nothing. Staging has to be idempotent.
+    """
+    exp = tmp_path / "exp"
+    exp.mkdir()
+    make_source(exp)
+
+    stale = exp / "phase1_single" / "node0" / "slices"
+    stale.mkdir(parents=True)
+    (stale / "slice_1.parquet").symlink_to(exp / "slices_p1" / "slice_1.parquet")
+    (stale / "url_column").write_text("stale\n")
+
+    result = stage(exp, "phase1_single", 0, "slices_p1/slice_1.parquet")
+    assert result.returncode == 0, result.stderr
+
+    staged = stale / "slice_1.parquet"
+    assert not staged.is_symlink(), "the stale link was not replaced"
+    assert staged.read_bytes() == b"PAR1payload"
+    assert (stale / "url_column").read_text().strip() == "url"
+
+
 def test_a_missing_source_slice_fails_loudly(tmp_path) -> None:
     """Staging silently producing nothing is how this bug reached the cluster."""
     exp = tmp_path / "exp"

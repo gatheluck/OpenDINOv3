@@ -1,6 +1,6 @@
 # Experiment 0003: Does spreading work across nodes cost anything?
 
-Status: **first attempt 2026-08-13 failed — produced nothing. Cause found and fixed; not yet re-run.**
+Status: **two attempts failed, both on staging rather than on the question. Third not yet run.**
 Date: 2026-08-13
 
 ## Question
@@ -244,6 +244,63 @@ stub the absolute symlink still resolves. What catches it is the explicit
 pair of assertions that no staged path is an absolute symlink, and that the
 staged tree still works after being moved.
 
+### Attempt 2, 2026-08-13: failed again, on the leftovers of attempt 1
+
+Job wall **12 seconds**, no shard written. This time the job said so — the
+shard count added after attempt 1 made it exit non-zero — but the run was
+still lost.
+
+```
+cp: '.../slices_p1/slice_1.parquet' and
+    '.../phase1_single/node0/slices/slice_1.parquet' are the same file
+❌ cannot copy .../slices_p1/slice_1.parquet
+bash: : No such file or directory
+```
+
+Attempt 1's symlinks were still sitting in the output directory. `cp -f`
+does not remove a symlink destination; it follows it, sees source and
+destination are the same file, and refuses. Reproduced exactly, locally, in
+one command.
+
+Then `bash ""` ran, because `run_phase_single` used the empty output of the
+failed staging as a script path. That is why the phases printed `wall 0 s`
+and looked like they had happened, and why `pbsdsh` reported `exit status
+127` on the other node.
+
+**Three faults, all fixed:**
+
+1. **Staging was not idempotent.** It now removes the destination before
+   copying. A re-run always finds the last run's files; that is the normal
+   case, not an edge case.
+2. **A failed staging did not stop the phase.** It now returns an error
+   instead of running an empty command.
+3. **A re-run would have mixed with the previous one.** Had attempt 1
+   produced shards, the analysis would have summed both runs and reported
+   the total as a single measurement. The job now moves any previous attempt
+   to `previous_<jobid>/` — set aside, not deleted — and counts shards only
+   under the current phase directories.
+
+### Why the fix for attempt 1 did not prevent attempt 2
+
+The end-to-end test added after attempt 1 ran the job **once, into an empty
+directory**. Every real re-run starts from a directory that is not empty.
+The test now runs the job twice into the same tree and checks both that it
+succeeds and that the two runs stay separate. Removing either fix fails a
+test.
+
+Four bugs in this experiment have now come from the same place: the seams
+between components, not the components. Each was invisible in unit tests and
+each cost a queue slot.
+
+### Also confirmed
+
+Home is unaffected by dropping `--env HOME`: `df` on the home filesystem
+reported 11% used both before and after the run, unchanged.
+
 ### Next
 
-Re-run. The question the experiment exists for is still unanswered.
+Third attempt. The question the experiment exists for is still unanswered:
+no measurement of node distribution has been taken.
+
+No manual cleanup is needed — the job sets the previous attempts aside
+itself.

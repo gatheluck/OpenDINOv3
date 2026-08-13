@@ -44,9 +44,19 @@ DEST="${EXP_OUT}/${PHASE}/node${NODE}/slices"
 
 mkdir -p "${DEST}" || die "cannot create ${DEST}"
 
+# Remove the destination first. `cp -f` is not enough: if a previous run left
+# a symlink here pointing back at the source, cp refuses with
+#
+#   cp: '.../slices_p1/slice_1.parquet' and '.../node0/slices/slice_1.parquet'
+#       are the same file
+#
+# which is how the second attempt at experiment 0003 failed in every phase.
+# Staging has to be idempotent — a re-run always finds the last run's files.
+#
 # Always slice_1: the worker reads one slice per invocation, and which slice
 # a node got is recorded by the directory it sits in.
-cp -f "${SRC}" "${DEST}/slice_1.parquet" || die "cannot copy ${SRC}"
-cp -f "${SRC_DIR}/url_column" "${DEST}/url_column" || die "cannot copy url_column"
+rm -f "${DEST}/slice_1.parquet" "${DEST}/url_column"
+cp "${SRC}" "${DEST}/slice_1.parquet" || die "cannot copy ${SRC}"
+cp "${SRC_DIR}/url_column" "${DEST}/url_column" || die "cannot copy url_column"
 
 printf '%s\n' "${DEST}"
