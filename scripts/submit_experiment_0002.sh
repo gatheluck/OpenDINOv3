@@ -9,7 +9,8 @@
 #   bash scripts/submit_experiment_0002.sh
 #
 # Required:
-#   OD_SIF        container image to run
+#   OD_SIF        container image to run. Defaults to opendinov3.sif under
+#                 OD_OUT_ROOT, which is where the setup docs put it.
 #   OD_URLS       source URL list (see the discovery hint below if unsure)
 #   OD_LOGDIR     writable directory for batch stdout/stderr
 # One of:
@@ -42,8 +43,13 @@ THREADS="${OD_THREADS:-32}"
 
 # --- what we need ------------------------------------------------------------
 
+if [ -z "${OD_SIF:-}" ] && [ -n "${OD_OUT_ROOT:-}" ]; then
+  # Where docs/ tells you to put the image after pulling and verifying it.
+  OD_SIF="${OD_OUT_ROOT}/opendinov3.sif"
+fi
 [ -n "${OD_SIF:-}" ] || die "OD_SIF is not set. Point it at the container image."
-[ -f "${OD_SIF}" ]   || die "OD_SIF does not exist: ${OD_SIF}"
+[ -f "${OD_SIF}" ] || die "OD_SIF does not exist: ${OD_SIF}
+   Pull and verify it first, then either place it there or set OD_SIF."
 
 [ -n "${OD_LOGDIR:-}" ] || die "OD_LOGDIR is not set. Source your env file first."
 
