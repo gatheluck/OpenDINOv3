@@ -1,7 +1,8 @@
 # Experiment 0001: Shard read-and-decode throughput
 
-Status: pre-registered, not yet run
-Date: 2026-08-13
+Status: **complete — hypothesis not rejected**
+Pre-registered: 2026-08-13
+Run: 2026-08-13
 
 Pre-registered before running, because a measurement whose confounders are
 listed only afterwards tends to list the ones that fit the answer. Two
@@ -94,4 +95,59 @@ singularity exec --bind "${OD_ROOT}:/data:ro" opendinov3.sif \
 
 ## Result
 
-Not yet run.
+Run on a login node, 3 shards of an untouched task, cold then warm.
+
+| | cold | warm |
+|---|---:|---:|
+| samples | 19,502 | 19,502 |
+| **samples/sec** | **2,078** | **2,183** |
+| MB/sec | 40.9 | 42.9 |
+| **decode failures** | **0** | **0** |
+| elapsed | 9.4 s | 8.9 s |
+
+Per-shard rates varied by under 1%, so the figure is stable across shards.
+
+### Against the falsification criteria
+
+**Worker count.** One process sustains ~2,078 samples/sec. The node has 192
+cores. Even granting a GPU an appetite of 2,000 images/sec, roughly one core
+feeds one GPU; loading would occupy a small fraction of the node for any
+plausible GPU count. Not rejected, by a wide margin.
+
+**Decode failure rate.** Zero failures in 19,502 samples. This is the expected
+result rather than a surprising one: `_stats.json` counts a sample as a
+success only after it decoded once at download time, and failed samples are
+never written. Zero on read-back means nothing degraded after writing. Not
+rejected.
+
+### What the cold/warm pair shows
+
+Warming the page cache bought only **5%**. If Lustre I/O were the constraint,
+a second pass over the same bytes would be far faster than that. Lustre
+sustains gigabytes per second, so 40.9 MB/sec is nowhere near its limit.
+
+**The pipeline is decode-bound, not I/O-bound.** That also means the cold
+figure can be used directly; the page-cache confounder listed above turns out
+to be small for this measurement.
+
+### Compute-node repeat: judged unnecessary
+
+The protocol called for repeating on a compute node if the result landed near
+a falsification boundary. It did not — the margin is an order of magnitude.
+Differences in CPU or storage path between node types cannot plausibly close
+a gap that size.
+
+### Conclusion
+
+**The shard format is usable for training. No change is needed.** G1, the
+largest unvalidated assumption in the project, is resolved.
+
+### Caveats that still stand
+
+- The figure excludes DataLoader collation and inter-process transfer. It is
+  a ceiling. The margin is large enough that even a 2–3× overhead leaves the
+  conclusion intact, but the number should not be quoted as training
+  throughput.
+- Single process. Scaling to N processes is not N times this, and was not
+  measured here.
+- Measured on a login node. Reported as such.
