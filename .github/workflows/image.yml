@@ -1,0 +1,67 @@
+name: image
+
+# Build the runtime image, verify its contract, and publish it.
+#
+# The image that CI verifies is the image the cluster runs (ADR 0001), so the
+# contract tests must pass before anything is published.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t opendinov3:test .
+
+      - name: Verify runtime contract
+        # Emulates Singularity's constraints with Docker flags: unmapped UID,
+        # read-only root, non-writable HOME, no network at import time.
+        run: bash tests/test_container_runtime.sh opendinov3:test
+
+      # Publishing only happens for merges to the default branch. Pull requests
+      # build and verify but do not publish.
+      - name: Log in to registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          repo=$(printf '%s' "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+          target="${REGISTRY}/${repo}"
+          docker tag opendinov3:test "${target}:latest"
+          docker tag opendinov3:test "${target}:${GITHUB_SHA}"
+          docker push "${target}:latest"
+          docker push "${target}:${GITHUB_SHA}"
+
+          # Record the digest. Production runs pin by digest, not by tag,
+          # so that a moving tag cannot silently change what executes.
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' \
+                   "${target}:${GITHUB_SHA}" 2>/dev/null || echo "unavailable")
+          echo "Published: ${target}:${GITHUB_SHA}"
+          echo "Digest:    ${digest}"
+          {
+            echo "### Image published"
+            echo ""
+            echo '```'
+            echo "singularity pull opendinov3.sif docker://${digest}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
