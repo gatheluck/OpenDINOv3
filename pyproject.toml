@@ -15,3 +15,9 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q"
+markers = [
+  # Drives the real pipeline: img2dataset, a local HTTP server, subprocesses.
+  # Seconds rather than milliseconds, so it can be deselected during a tight
+  # edit loop with -m "not integration". CI runs everything.
+  "integration: exercises the full pipeline end to end",
+]

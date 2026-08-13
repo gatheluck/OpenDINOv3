@@ -29,8 +29,26 @@ THREADS="${OD_THREADS:-32}"
 
 mkdir -p "${OD_EXP_OUT}"
 
+# The slicer writes parquet when the corpus is parquet, so that img2dataset
+# reads the slices the same way it reads production input. Which one it wrote
+# is visible from the files themselves rather than assumed here.
+if [ -f "${OD_SLICE_DIR}/slice_1.parquet" ]; then
+  INPUT_FORMAT="parquet"
+  SLICE_EXT="parquet"
+  URL_COL=$(cat "${OD_SLICE_DIR}/url_column" 2>/dev/null)
+  [ -n "${URL_COL}" ] || { echo "❌ ${OD_SLICE_DIR}/url_column missing" >&2; exit 1; }
+elif [ -f "${OD_SLICE_DIR}/slice_1.txt" ]; then
+  INPUT_FORMAT="txt"
+  SLICE_EXT="txt"
+  URL_COL=""
+else
+  echo "❌ no slice_1.parquet or slice_1.txt in ${OD_SLICE_DIR}" >&2
+  exit 1
+fi
+
 echo "experiment 0002 — download concurrency"
-echo "slices    : ${OD_SLICE_DIR}"
+echo "slices    : ${OD_SLICE_DIR} (${INPUT_FORMAT})"
+[ -n "${URL_COL}" ] && echo "url column: ${URL_COL}"
 echo "levels    : ${LEVELS}"
 echo "threads   : ${THREADS} (held constant so only one variable moves)"
 echo "output    : ${OD_EXP_OUT}"
@@ -42,7 +60,7 @@ failures=0
 
 for procs in ${LEVELS}; do
   run=$((run + 1))
-  slice_file="${OD_SLICE_DIR}/slice_${run}.txt"
+  slice_file="${OD_SLICE_DIR}/slice_${run}.${SLICE_EXT}"
 
   if [ ! -s "${slice_file}" ]; then
     echo "run ${run}: ${slice_file} missing or empty; stopping"
@@ -53,7 +71,14 @@ for procs in ${LEVELS}; do
   label="run${run}_p${procs}"
   workdir="${OD_EXP_OUT}/${label}"
   mkdir -p "${workdir}"
-  n=$(wc -l < "${slice_file}")
+
+  if [ "${INPUT_FORMAT}" = "parquet" ]; then
+    n=$(python -c "import pyarrow.parquet as pq,sys;print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)" "${slice_file}")
+    url_col_args=(--url_col "${URL_COL}")
+  else
+    n=$(wc -l < "${slice_file}")
+    url_col_args=()
+  fi
 
   echo "──────────────────────────────────────────────────────────"
   echo "run ${run}: processes=${procs} threads=${THREADS} urls=${n}"
@@ -63,7 +88,8 @@ for procs in ${LEVELS}; do
   t0=$(date +%s)
   img2dataset \
     --url_list "${slice_file}" \
-    --input_format txt \
+    --input_format "${INPUT_FORMAT}" \
+    "${url_col_args[@]}" \
     --output_folder "${workdir}/shards" \
     --output_format webdataset \
     --image_size 256 \

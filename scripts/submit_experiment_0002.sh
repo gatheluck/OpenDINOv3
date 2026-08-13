@@ -29,7 +29,8 @@
 
 set -uo pipefail
 
-die() { printf '\n❌ %s\n\n' "$*" >&2; exit 1; }
+die()  { printf '\n❌ %s\n\n' "$*" >&2; exit 1; }
+warn() { printf '\n⚠️  %s\n\n' "$*" >&2; }
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -64,16 +65,28 @@ if [ -z "${OD_URLS:-}" ]; then
   if [ -n "${OD_ROOT:-}" ] && [ -d "${OD_ROOT}" ]; then
     echo "   Candidates under OD_ROOT larger than 1 MB:" >&2
     find "${OD_ROOT}" -maxdepth 5 -type f \
-         \( -name '*url*' -o -name '*.tsv' -o -name '*.txt' \) \
+         \( -name '*url*' -o -name '*.parquet' -o -name '*.tsv' -o -name '*.txt' \) \
          -size +1M 2>/dev/null | head -20 >&2 || true
     echo >&2
   fi
-  echo "   Set OD_URLS to a text URL list and run again." >&2
-  echo "   A parquet file will be refused: the slicer checks for it." >&2
-  echo >&2
+  cat >&2 <<'HINT'
+   Set OD_URLS to a parquet or text URL list, or to a directory of them,
+   and run again.
+
+   ⚠ Prefer a task under raw_shards. Lists under dns_recovery hold URLs
+     that already failed DNS once, so their failure profile is not the
+     corpus's and a measurement taken on them would not transfer.
+HINT
   exit 1
 fi
-[ -f "${OD_URLS}" ] || die "OD_URLS does not exist: ${OD_URLS}"
+[ -e "${OD_URLS}" ] || die "OD_URLS does not exist: ${OD_URLS}"
+
+case "${OD_URLS}" in
+  *dns_recovery*)
+    warn_dns_recovery=1 ;;
+  *)
+    warn_dns_recovery=0 ;;
+esac
 
 SUBMIT="${OD_SUBMIT:-}"
 if [ -z "${SUBMIT}" ] && [ -x "${OD_CAPTURE_ROOT:-}/od_qsub.sh" ]; then
@@ -92,7 +105,43 @@ mkdir -p "${OD_LOGDIR}" "${EXP_OUT}" || die "cannot create ${OD_LOGDIR} or ${EXP
 # per level. Four levels is ~40 minutes if nothing scales, and less if it
 # does. The walltime is the hard stop on the whole thing.
 
-TOTAL_URLS=$((SLICE * $(printf '%s\n' ${LEVELS} | wc -l)))
+LEVEL_COUNT=$(printf '%s\n' ${LEVELS} | wc -l | tr -d ' ')
+TOTAL_URLS=$((SLICE * LEVEL_COUNT))
+
+# --- read the source before spending a submission ----------------------------
+#
+# The job's first step slices the list. A wrong schema or too few rows fails a
+# minute into a reserved node, after the queue wait. Parquet carries its row
+# count in metadata, so checking here costs a file open and catches it now.
+
+if command -v singularity >/dev/null 2>&1; then
+  if [ -d "${OD_URLS}" ]; then
+    url_bind="${OD_URLS}"; url_path="/urls"
+  else
+    url_bind="${OD_URLS%/*}"; url_path="/urls/${OD_URLS##*/}"
+  fi
+
+  echo "reading the URL source…"
+  inspect_out=$(singularity exec --bind "${REPO}:/work:ro" \
+                  --bind "${url_bind}:/urls:ro" "${OD_SIF}" \
+                  python /work/scripts/slice_urls.py "${url_path}" --inspect 2>&1)
+  inspect_rc=$?
+  printf '%s\n' "${inspect_out}" | sed 's/^/  /'
+  [ "${inspect_rc}" -eq 0 ] \
+    || die "the URL source cannot be read as a URL list; not submitting."
+
+  rows=$(printf '%s\n' "${inspect_out}" \
+         | awk -F': *' '/^rows/ { gsub(/,/, "", $2); print $2 }')
+  if [ -n "${rows}" ] && [ "${rows}" -lt "${TOTAL_URLS}" ]; then
+    die "${rows} rows is not enough for ${LEVEL_COUNT} slices of ${SLICE} \
+(${TOTAL_URLS} needed).
+   Either set OD_SLICE=$((rows / LEVEL_COUNT)) or below,
+   or point OD_URLS at a directory of task lists so they are concatenated."
+  fi
+else
+  warn "singularity not found here; skipping the source check.
+   The job will still check, but only after it starts on a node."
+fi
 
 # --- build the job -----------------------------------------------------------
 
@@ -132,6 +181,13 @@ experiment 0002 — download concurrency
   Criteria : registered before the run; the analysis applies them as written.
 
 SUMMARY
+
+if [ "${warn_dns_recovery}" -eq 1 ]; then
+  warn "OD_URLS points under dns_recovery.
+   Those URLs already failed DNS once, so their failure profile is not the
+   corpus's. Throughput and yield measured on them will not transfer to
+   production. Use a task under raw_shards unless you mean to study recovery."
+fi
 
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo "dry run — not submitting. Would run:"
