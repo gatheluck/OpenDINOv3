@@ -133,6 +133,31 @@ def test_too_few_rows_is_refused_with_the_number_that_would_fit() -> None:
     assert "22" in str(excinfo.value), "should suggest 90 // 4 = 22"
 
 
+def test_an_offset_skips_rows_already_used_by_another_phase() -> None:
+    """Experiment 0003 runs three phases that must not share URLs.
+
+    Cutting from the start each time would hand phase B the URLs phase A
+    already warmed, and the difference between phases would include that.
+    """
+    table = make_table(100)
+    slices = pu.slice_table(table, count=10, n_slices=2, offset=40)
+    assert slices[0].column("key")[0].as_py() == "000000040"
+    assert slices[1].column("key")[0].as_py() == "000000050"
+
+
+def test_the_offset_counts_toward_the_rows_needed() -> None:
+    """90 rows cannot supply 2 slices of 10 starting at row 80."""
+    table = make_table(90)
+    with pytest.raises(UrlListFormatError):
+        pu.slice_table(table, count=10, n_slices=2, offset=80)
+
+
+def test_a_zero_offset_is_the_previous_behaviour() -> None:
+    table = make_table(100)
+    assert pu.slice_table(table, count=25, n_slices=4, offset=0) == \
+        pu.slice_table(table, count=25, n_slices=4)
+
+
 def test_exactly_enough_rows_is_accepted() -> None:
     table = make_table(100)
     assert len(pu.slice_table(table, count=25, n_slices=4)) == 4

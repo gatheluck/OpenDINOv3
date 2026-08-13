@@ -53,6 +53,9 @@ def main() -> int:
                         help="where to write the slices")
     parser.add_argument("--count", type=int, help="URLs per slice")
     parser.add_argument("--slices", type=int, help="how many slices to cut")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="skip this many URLs first, so that a later "
+                             "phase does not reuse an earlier one's URLs")
     parser.add_argument("--inspect", action="store_true",
                         help="report the schema and row count, write nothing")
     args = parser.parse_args()
@@ -75,8 +78,10 @@ def main() -> int:
 
     args.outdir.mkdir(parents=True, exist_ok=True)
     if parquet:
-        return cut_parquet(args.source, args.outdir, args.count, args.slices)
-    return cut_text(args.source, args.outdir, args.count, args.slices)
+        return cut_parquet(args.source, args.outdir, args.count,
+                           args.slices, args.offset)
+    return cut_text(args.source, args.outdir, args.count, args.slices,
+                    args.offset)
 
 
 def inspect(source: Path, parquet: bool) -> int:
@@ -99,11 +104,13 @@ def inspect(source: Path, parquet: bool) -> int:
     return 0
 
 
-def cut_parquet(source: Path, outdir: Path, count: int, n_slices: int) -> int:
-    wanted = count * n_slices
+def cut_parquet(source: Path, outdir: Path, count: int, n_slices: int,
+                offset: int = 0) -> int:
+    wanted = offset + count * n_slices
     try:
         table, column = pu.read_urls(source, at_least=wanted)
-        slices = pu.slice_table(table, count=count, n_slices=n_slices)
+        slices = pu.slice_table(table, count=count, n_slices=n_slices,
+                                offset=offset)
     except Exception as exc:  # noqa: BLE001 — the message is the point
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -122,8 +129,9 @@ def cut_parquet(source: Path, outdir: Path, count: int, n_slices: int) -> int:
     return 0
 
 
-def cut_text(source: Path, outdir: Path, count: int, n_slices: int) -> int:
-    wanted = count * n_slices
+def cut_text(source: Path, outdir: Path, count: int, n_slices: int,
+             offset: int = 0) -> int:
+    wanted = offset + count * n_slices
     urls: list[str] = []
     column: int | None = None
     header_seen = False
@@ -159,6 +167,7 @@ def cut_text(source: Path, outdir: Path, count: int, n_slices: int) -> int:
           + (f" (url is column {column})" if column is not None else ""))
     print(f"collected  : {len(urls):,} URLs (wanted {wanted:,})")
 
+    urls = urls[offset:]
     written = 0
     for index in range(n_slices):
         chunk = urls[index * count:(index + 1) * count]

@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Submit experiment 0003 (node distribution) as a multi-node batch job.
+#
+# Site identifiers are never written here. Everything comes from the
+# environment, so this file is safe to publish.
+#
+#   source <your env file>
+#   bash scripts/submit_experiment_0003.sh --dry-run
+#   bash scripts/submit_experiment_0003.sh
+#
+# Required:
+#   OD_SIF     container image. Defaults to opendinov3.sif under OD_OUT_ROOT.
+#   OD_URLS    source URL list. Use a DIFFERENT task from experiment 0002:
+#              re-downloading the same URLs within hours lets remote caching
+#              and rate limiting carry between the two experiments.
+#   OD_LOGDIR  writable directory for batch stdout/stderr
+# One of:
+#   OD_EXP_OUT, or OD_OUT_ROOT (writes under experiments/0003)
+# Submission:
+#   OD_SUBMIT  submitter taking --nodes/--walltime <script>. Defaults to
+#              od_qsub.sh in OD_CAPTURE_ROOT when present.
+# Optional:
+#   OD_EXP_WALLTIME       default 01:30:00
+#   OD_SLICE              URLs per phase, default 200000
+#   OD_TOTAL_PROCESSES    held constant across configurations, default 32
+#   OD_NODES_MULTI        nodes in the multi-node phase, default 2
+#   OD_THREADS            default 32
+#   OD_SAMPLES_PER_SHARD  default 1000
+
+set -uo pipefail
+
+die()  { printf '\n❌ %s\n\n' "$*" >&2; exit 1; }
+warn() { printf '\n⚠️  %s\n\n' "$*" >&2; }
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+DRY_RUN=0
+[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+
+WALLTIME="${OD_EXP_WALLTIME:-01:30:00}"
+SLICE="${OD_SLICE:-200000}"
+TOTAL="${OD_TOTAL_PROCESSES:-32}"
+NODES="${OD_NODES_MULTI:-2}"
+THREADS="${OD_THREADS:-32}"
+SAMPLES_PER_SHARD="${OD_SAMPLES_PER_SHARD:-1000}"
+PHASES=3
+
+# --- what we need ------------------------------------------------------------
+
+if [ -z "${OD_SIF:-}" ] && [ -n "${OD_OUT_ROOT:-}" ]; then
+  OD_SIF="${OD_OUT_ROOT}/opendinov3.sif"
+fi
+[ -n "${OD_SIF:-}" ] || die "OD_SIF is not set."
+[ -f "${OD_SIF}" ] || die "OD_SIF does not exist: ${OD_SIF}"
+[ -n "${OD_LOGDIR:-}" ] || die "OD_LOGDIR is not set. Source your env file first."
+
+EXP_OUT="${OD_EXP_OUT:-}"
+if [ -z "${EXP_OUT}" ]; then
+  [ -n "${OD_OUT_ROOT:-}" ] || die "Set OD_EXP_OUT, or OD_OUT_ROOT to derive it."
+  EXP_OUT="${OD_OUT_ROOT}/experiments/0003"
+fi
+
+[ -n "${OD_URLS:-}" ] || die "OD_URLS is not set. Use a task list that
+   experiment 0002 did not use."
+[ -e "${OD_URLS}" ] || die "OD_URLS does not exist: ${OD_URLS}"
+
+case "${OD_URLS}" in
+  *dns_recovery*) warn_dns_recovery=1 ;;
+  *)              warn_dns_recovery=0 ;;
+esac
+
+SUBMIT="${OD_SUBMIT:-}"
+if [ -z "${SUBMIT}" ] && [ -x "${OD_CAPTURE_ROOT:-}/od_qsub.sh" ]; then
+  SUBMIT="${OD_CAPTURE_ROOT}/od_qsub.sh"
+fi
+[ -n "${SUBMIT}" ] || [ "${DRY_RUN}" -eq 1 ] \
+  || die "No submitter. Set OD_SUBMIT, or OD_CAPTURE_ROOT."
+
+mkdir -p "${OD_LOGDIR}" "${EXP_OUT}" || die "cannot create output directories"
+
+TOTAL_URLS=$((SLICE * PHASES))
+
+# --- would this configuration measure what it claims? ------------------------
+
+plan_cmd=()
+if command -v python3 >/dev/null 2>&1; then
+  plan_cmd=(python3 "${REPO}/scripts/plan_experiment_0003.py")
+elif command -v singularity >/dev/null 2>&1; then
+  plan_cmd=(singularity exec --bind "${REPO}:/work:ro" "${OD_SIF}"
+            python /work/scripts/plan_experiment_0003.py)
+fi
+
+if [ "${#plan_cmd[@]}" -gt 0 ]; then
+  echo "concurrency plan (total held at ${TOTAL})"
+  "${plan_cmd[@]}" --total "${TOTAL}" --slice "${SLICE}" \
+      --samples-per-shard "${SAMPLES_PER_SHARD}" --nodes "1 ${NODES}" \
+    | sed 's/^/  /'
+  [ "${PIPESTATUS[0]}" -eq 0 ] \
+    || die "this configuration would not measure what it claims; not submitting."
+  echo
+else
+  warn "no python3 and no singularity here; skipping the concurrency check."
+fi
+
+# --- read the source before spending a submission ----------------------------
+
+if command -v singularity >/dev/null 2>&1; then
+  if [ -d "${OD_URLS}" ]; then
+    url_bind="${OD_URLS}"; url_path="/urls"
+  else
+    url_bind="${OD_URLS%/*}"; url_path="/urls/${OD_URLS##*/}"
+  fi
+  echo "reading the URL source…"
+  inspect_out=$(singularity exec --bind "${REPO}:/work:ro" \
+                  --bind "${url_bind}:/urls:ro" "${OD_SIF}" \
+                  python /work/scripts/slice_urls.py "${url_path}" --inspect 2>&1)
+  inspect_rc=$?
+  printf '%s\n' "${inspect_out}" | sed 's/^/  /'
+  [ "${inspect_rc}" -eq 0 ] || die "the URL source cannot be read; not submitting."
+
+  rows=$(printf '%s\n' "${inspect_out}" \
+         | awk -F': *' '/^rows/ { gsub(/,/, "", $2); print $2 }')
+  if [ -n "${rows}" ] && [ "${rows}" -lt "${TOTAL_URLS}" ]; then
+    die "${rows} rows is not enough for ${PHASES} phases of ${SLICE} \
+(${TOTAL_URLS} needed).
+   Set OD_SLICE=$((rows / PHASES)) or below, or point OD_URLS at a directory."
+  fi
+else
+  warn "singularity not found here; skipping the source check."
+fi
+
+# --- build the job -----------------------------------------------------------
+
+JOB="${OD_LOGDIR}/experiment_0003_job.generated.sh"
+{
+  echo "#!/usr/bin/env bash"
+  echo "# Generated by scripts/submit_experiment_0003.sh — do not edit."
+  echo "# The body below is scripts/experiment_0003_job.sh, unmodified."
+  echo "export OD_SIF=$(printf '%q' "${OD_SIF}")"
+  echo "export OD_REPO=$(printf '%q' "${REPO}")"
+  echo "export OD_URLS=$(printf '%q' "${OD_URLS}")"
+  echo "export OD_EXP_OUT=$(printf '%q' "${EXP_OUT}")"
+  echo "export OD_SLICE=$(printf '%q' "${SLICE}")"
+  echo "export OD_TOTAL_PROCESSES=$(printf '%q' "${TOTAL}")"
+  echo "export OD_NODES=$(printf '%q' "${NODES}")"
+  echo "export OD_THREADS=$(printf '%q' "${THREADS}")"
+  echo "export OD_SAMPLES_PER_SHARD=$(printf '%q' "${SAMPLES_PER_SHARD}")"
+  echo
+  cat "${REPO}/scripts/experiment_0003_job.sh"
+} > "${JOB}"
+chmod +x "${JOB}"
+
+cat <<SUMMARY
+
+experiment 0003 — does spreading across nodes cost anything?
+
+  image     : ${OD_SIF}
+  repo      : ${REPO}
+  urls      : ${OD_URLS}
+  output    : ${EXP_OUT}
+  phases    : 1×${TOTAL}p → ${NODES}×$((TOTAL / NODES))p → 1×${TOTAL}p
+              (total processes held at ${TOTAL}; threads ${THREADS})
+  shard     : ${SAMPLES_PER_SHARD} samples/shard
+  slice     : ${SLICE} URLs per phase, ${TOTAL_URLS} total, disjoint
+  nodes     : ${NODES}   (held for the whole job; idle during phases 1 and 3)
+  walltime  : ${WALLTIME}
+  job file  : ${JOB}
+  submitter : ${SUBMIT:-<none: dry run>}
+
+  Protocol : docs/experiments/0003-node-distribution.md
+  Criteria : registered before the run; the analysis applies them as written.
+
+SUMMARY
+
+if [ "${warn_dns_recovery}" -eq 1 ]; then
+  warn "OD_URLS points under dns_recovery. Those URLs already failed DNS once,
+   so a measurement on them will not transfer. Use a task under raw_shards."
+fi
+
+if [ "${DRY_RUN}" -eq 1 ]; then
+  echo "dry run — not submitting. Would run:"
+  echo "  ${SUBMIT:-<submitter>} --nodes ${NODES} --walltime ${WALLTIME} ${JOB}"
+  echo
+  exit 0
+fi
+
+exec "${SUBMIT}" --nodes "${NODES}" --walltime "${WALLTIME}" "${JOB}"
