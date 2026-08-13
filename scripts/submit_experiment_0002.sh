@@ -26,6 +26,10 @@
 #   OD_SLICE         URLs per level, default 200000
 #   OD_LEVELS        process counts, default "8 32 64 8"
 #   OD_THREADS       threads per process, default 32
+#   OD_SAMPLES_PER_SHARD  samples per shard, default 1000. This caps usable
+#                    concurrency: img2dataset gives each process one shard
+#                    at a time, so levels above the shard count silently
+#                    run at the shard count.
 
 set -uo pipefail
 
@@ -41,6 +45,9 @@ WALLTIME="${OD_EXP_WALLTIME:-02:30:00}"
 SLICE="${OD_SLICE:-200000}"
 LEVELS="${OD_LEVELS:-8 32 64 8}"
 THREADS="${OD_THREADS:-32}"
+# 1,000 keeps 200 shards per level: enough that 64 processes all get work
+# and each gets through ~3 shards. See docs for why both matter.
+SAMPLES_PER_SHARD="${OD_SAMPLES_PER_SHARD:-1000}"
 
 # --- what we need ------------------------------------------------------------
 
@@ -108,6 +115,35 @@ mkdir -p "${OD_LOGDIR}" "${EXP_OUT}" || die "cannot create ${OD_LOGDIR} or ${EXP
 LEVEL_COUNT=$(printf '%s\n' ${LEVELS} | wc -l | tr -d ' ')
 TOTAL_URLS=$((SLICE * LEVEL_COUNT))
 
+# --- can this configuration reach the concurrency it asks for? ---------------
+#
+# img2dataset gives each process one shard at a time, so a level asking for
+# more processes than there are shards silently runs at the shard count. The
+# check is cheap and the failure it prevents is invisible in the output.
+
+plan_cmd=()
+if command -v python3 >/dev/null 2>&1; then
+  # The plan needs no data and no third-party package, so a bare python3 is
+  # enough and avoids paying for a container start.
+  plan_cmd=(python3 "${REPO}/scripts/plan_experiment_0002.py")
+elif command -v singularity >/dev/null 2>&1; then
+  plan_cmd=(singularity exec --bind "${REPO}:/work:ro" "${OD_SIF}"
+            python /work/scripts/plan_experiment_0002.py)
+fi
+
+if [ "${#plan_cmd[@]}" -gt 0 ]; then
+  echo "concurrency plan"
+  "${plan_cmd[@]}" --slice "${SLICE}" \
+      --samples-per-shard "${SAMPLES_PER_SHARD}" --levels "${LEVELS}" \
+    | sed 's/^/  /'
+  plan_rc=${PIPESTATUS[0]}
+  [ "${plan_rc}" -eq 0 ] \
+    || die "this configuration would not measure what it claims; not submitting."
+  echo
+else
+  warn "no python3 and no singularity here; skipping the concurrency check."
+fi
+
 # --- read the source before spending a submission ----------------------------
 #
 # The job's first step slices the list. A wrong schema or too few rows fails a
@@ -158,6 +194,7 @@ JOB="${OD_LOGDIR}/experiment_0002_job.generated.sh"
   echo "export OD_SLICE=$(printf '%q' "${SLICE}")"
   echo "export OD_LEVELS=$(printf '%q' "${LEVELS}")"
   echo "export OD_THREADS=$(printf '%q' "${THREADS}")"
+  echo "export OD_SAMPLES_PER_SHARD=$(printf '%q' "${SAMPLES_PER_SHARD}")"
   echo
   cat "${REPO}/scripts/experiment_0002_job.sh"
 } > "${JOB}"
@@ -172,6 +209,7 @@ experiment 0002 — download concurrency
   urls      : ${OD_URLS}
   output    : ${EXP_OUT}
   levels    : ${LEVELS}   (processes; threads held at ${THREADS})
+  shard     : ${SAMPLES_PER_SHARD} samples/shard
   slice     : ${SLICE} URLs per level, ${TOTAL_URLS} total, disjoint
   walltime  : ${WALLTIME}
   job file  : ${JOB}

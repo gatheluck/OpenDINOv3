@@ -26,6 +26,9 @@ set -uo pipefail
 : "${OD_EXP_OUT:?set OD_EXP_OUT}"
 LEVELS="${OD_LEVELS:-8 32 64 8}"
 THREADS="${OD_THREADS:-32}"
+# Shards, not URLs, are the unit img2dataset hands to a process, so this
+# value sets the ceiling on usable concurrency. Held constant across levels.
+SAMPLES_PER_SHARD="${OD_SAMPLES_PER_SHARD:-1000}"
 
 mkdir -p "${OD_EXP_OUT}"
 
@@ -51,6 +54,7 @@ echo "slices    : ${OD_SLICE_DIR} (${INPUT_FORMAT})"
 [ -n "${URL_COL}" ] && echo "url column: ${URL_COL}"
 echo "levels    : ${LEVELS}"
 echo "threads   : ${THREADS} (held constant so only one variable moves)"
+echo "shard size: ${SAMPLES_PER_SHARD} samples (sets the concurrency ceiling)"
 echo "output    : ${OD_EXP_OUT}"
 echo "started   : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo
@@ -96,7 +100,7 @@ for procs in ${LEVELS}; do
     --resize_mode no \
     --processes_count "${procs}" \
     --thread_count "${THREADS}" \
-    --number_sample_per_shard 10000 \
+    --number_sample_per_shard "${SAMPLES_PER_SHARD}" \
     --compute_hash sha256 \
     --timeout 10 \
     --retries 2 \

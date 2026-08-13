@@ -77,6 +77,51 @@ Four runs on one node, in sequence, inside one job.
 
 `threads` is held at 32 so that only one variable moves.
 
+### Shard size sets the ceiling on concurrency
+
+img2dataset distributes work one shard at a time — its distributor is
+`Pool(processes_count).imap_unordered(downloader, reader)`, and the reader
+yields `ceil(rows / number_sample_per_shard)` shards. Effective concurrency
+is therefore `min(processes, shards)`, and asking for more processes than
+there are shards does nothing at all.
+
+At production's shard size of 10,000, a 200,000-URL slice is **20 shards**.
+The 32- and 64-process levels would both have run at 20, been
+indistinguishable, and the experiment would have recorded "8 → 32" while
+measuring "8 → 20". Nothing in the output would have said so.
+
+So `number_sample_per_shard` is **1,000** here, giving 200 shards per level:
+
+| Processes | Effective | Shards | Shards per process |
+|---:|---:|---:|---:|
+| 8 | 8 | 200 | 25.0 |
+| 32 | 32 | 200 | 6.2 |
+| 64 | 64 | 200 | 3.1 |
+
+Every level reaches its requested count, and the busiest still gets about
+three shards per process, so one slow shard is a fraction of the run rather
+than its duration. Shard size is held constant across levels, so it is not a
+second variable.
+
+`scripts/plan_experiment_0002.py` computes this and the submit script refuses
+a configuration whose levels would be capped. The logic is tested in
+`tests/test_concurrency_plan.py`, including against the original 10,000
+setting.
+
+Two deviations follow from the smaller shard, both small and both stated
+rather than hidden:
+
+- **Shard size differs from production's 10,000.** Absolute throughput here
+  therefore carries slightly more per-shard overhead than production would.
+  The comparison between levels is unaffected, since all four share it.
+- **Worker recycling favours the hypothesis slightly.** img2dataset sets
+  `maxtasksperchild=5`, so a worker is replaced every five shards. At 8
+  processes each worker handles ~25 shards and pays ~5 respawns; at 64 it
+  handles ~3 and pays none. A respawn costs a fresh `import img2dataset`,
+  **measured at 0.72 s**, so the 8-process levels lose roughly 3.6 s of a
+  ~10-minute run — under 1%, against a 50% threshold. Not zero, and it
+  pushes in the direction the hypothesis wants, so it is recorded.
+
 **Run 4 repeats run 1's setting on fresh URLs.** If the two disagree, the
 cluster changed underneath the experiment and no difference between levels
 can be attributed to concurrency.
