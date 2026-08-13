@@ -29,6 +29,8 @@ jobs:
       - name: Verify runtime contract
         # Emulates Singularity's constraints with Docker flags: unmapped UID,
         # read-only root, non-writable HOME, no network at import time.
+        # Duplicated from the test workflow on purpose: nothing is published
+        # unless the image about to be published has passed on its own.
         run: bash tests/test_container_runtime.sh opendinov3:test
 
       # Publishing only happens for merges to the default branch. Pull requests
