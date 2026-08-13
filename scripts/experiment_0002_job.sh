@@ -13,6 +13,7 @@
 #   OD_SLICE      URLs per level
 #   OD_LEVELS     process counts
 #   OD_THREADS    threads per process
+#   OD_SAMPLES_PER_SHARD  samples per shard; caps usable concurrency
 
 set -uo pipefail
 
@@ -21,7 +22,8 @@ echo "started   : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "cores     : $(grep -c processor /proc/cpuinfo)"
 echo
 
-for v in OD_SIF OD_REPO OD_URLS OD_EXP_OUT OD_SLICE OD_LEVELS OD_THREADS; do
+for v in OD_SIF OD_REPO OD_URLS OD_EXP_OUT OD_SLICE OD_LEVELS OD_THREADS \
+         OD_SAMPLES_PER_SHARD; do
   eval "val=\${$v:-}"
   if [ -z "${val}" ]; then
     echo "❌ ${v} is not set. The submit script should have provided it." >&2
@@ -95,6 +97,7 @@ singularity exec "${bind_args[@]}" "${env_args[@]}" \
   --env "OD_EXP_OUT=/out" \
   --env "OD_LEVELS=${OD_LEVELS}" \
   --env "OD_THREADS=${OD_THREADS}" \
+  --env "OD_SAMPLES_PER_SHARD=${OD_SAMPLES_PER_SHARD}" \
   "${OD_SIF}" \
   bash /work/scripts/experiment_0002_worker.sh
 rc=$?
