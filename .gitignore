@@ -1,0 +1,60 @@
+# ============================================================================
+#  THIS REPOSITORY IS PUBLIC
+# ============================================================================
+#  Never commit site-specific values: group IDs, account IDs, reservation
+#  queue names, or absolute paths. Git history cannot be erased.
+#  Enforced by check_no_identifiers.sh (pre-commit hook + CI).
+# ============================================================================
+
+# --- Site-specific real values ----------------------------------------------
+# Use env.local.sh* (with the glob) so derived files such as .bak / .orig /
+# .save are covered too. A bare filename does not stop its derivatives.
+env.local.sh*
+.env
+.env.*
+*.local
+!*.local.example
+.identifier-patterns.local
+.identifier-allow.local
+
+# --- Editor / backup files (may contain real values) ------------------------
+*.bak
+*.orig
+*.save
+*~
+*.swp
+
+# --- Archives (may bundle secrets, bypassing per-file ignores) --------------
+*.zip
+*.tar.gz
+*.tgz
+
+# --- No dataset payloads ----------------------------------------------------
+# Downloaded images are third-party content; committing them would be
+# redistribution. Tests use synthetic fixtures instead.
+*.tar
+*.parquet
+*.jpg
+*.jpeg
+*.png
+*.webp
+data/
+outputs/
+shards/
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# --- OS / editors -----------------------------------------------------------
+.DS_Store
+.vscode/
+.idea/

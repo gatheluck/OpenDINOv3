@@ -1,0 +1,20 @@
+name: guard
+
+# This repository is public. Stop site-specific identifiers mechanically.
+#
+# A pre-commit hook alone is not enough: hooks are not carried by `git clone`,
+# so pushes from other machines bypass them. CI alone is not enough either,
+# because by the time it fails the commit is already in the history.
+# Both are required.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  no-identifiers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for site-specific identifiers
+        run: bash check_no_identifiers.sh

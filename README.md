@@ -1,0 +1,81 @@
+# OpenDINOv3
+
+Tooling to download large public image datasets and build them into a
+reusable, training-ready corpus on HPC.
+
+**Status: bootstrap.** Only the safety foundation is in place. The pipeline
+itself is not implemented yet.
+
+---
+
+## What this is
+
+A downloader and dataset builder for web-scale image-text corpora
+(DataComp-1B, COYO-700M and similar), producing WebDataset shards suitable
+for self-supervised pretraining at DINOv3 scale.
+
+The immediate target platform is an HPC cluster with a PBS scheduler and a
+Lustre filesystem. **Portability is a first-class goal**, not an afterthought:
+the same code runs locally in Docker, in CI, and on the cluster.
+
+## Design principles
+
+**No site-specific values in the code.** Group IDs, account IDs, queue names
+and absolute paths are runtime configuration. This is enforced mechanically
+by `check_no_identifiers.sh` (pre-commit hook and CI), because this
+repository is public and Git history cannot be erased.
+
+**One image, three environments.** A single `Dockerfile` serves local
+development, CI, and cluster execution (converted to Apptainer). This removes
+"works locally, fails on the cluster" caused by environment drift.
+
+**Dependencies point one way.** Core logic is platform-agnostic and never
+imports platform code; schedulers are thin, swappable adapters. Only two
+things are abstracted — job submission and output location. Everything else
+(concurrency, shard size, retries) is configuration, not abstraction.
+
+**Local is a supported platform, not a test harness.** The `local` backend
+exists because portability requires it; being able to develop without the
+cluster is a consequence, not the goal.
+
+## Testing
+
+Three kinds, deliberately separated:
+
+| Kind | Runs in | Scope |
+|---|---|---|
+| **Unit** | Docker, CI | Pure logic: task partitioning, accounting, failure classification |
+| **Contract** | Docker, CI | Synthetic fixtures matching the real shard schema |
+| **Experiment** | Cluster only | Throughput, yield, concurrency effects |
+
+Experiments are **not tests**. They are non-deterministic and confounded, so
+they are pre-registered — question, hypothesis, falsification criteria,
+confounders, and what the measurement *cannot* answer — before being run.
+They never run in CI.
+
+Fixtures are **synthetic**. Downloaded images are third-party content, so
+real samples cannot live in a public repository. Tests generate data with the
+same structure instead, which also keeps CI hermetic.
+
+## Getting started
+
+```bash
+git clone git@github.com:gatheluck/OpenDINOv3.git
+cd OpenDINOv3
+bash scripts/install_hooks.sh    # required: hooks are not cloned
+bash check_no_identifiers.sh     # should report OK
+```
+
+## Repository layout
+
+```
+check_no_identifiers.sh     Identifier guard (pre-commit + CI)
+scripts/install_hooks.sh    Hook installer
+.github/workflows/          CI
+```
+
+Further directories are added as the pipeline is implemented.
+
+## License
+
+TBD.
