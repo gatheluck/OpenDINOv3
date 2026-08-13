@@ -1,6 +1,6 @@
 # Experiment 0003: Does spreading work across nodes cost anything?
 
-Status: pre-registered, not yet run
+Status: **first attempt 2026-08-13 failed — produced nothing. Cause found and fixed; not yet re-run.**
 Date: 2026-08-13
 
 ## Question
@@ -173,4 +173,77 @@ singularity exec --bind "${OD_PUBLIC_ROOT}:/work:ro" \
 
 ## Result
 
-Not yet run.
+### Attempt 1, 2026-08-13: failed, measured nothing
+
+Job wall time **17 seconds**, exit status **0**. No shard was written by any
+phase.
+
+**The part expected to be fragile worked.** Two nodes were allocated
+(hnode031, hnode034), `pbsdsh` was selected as the launcher, and scripts ran
+on both nodes — the log shows `phase2_multi: 2 nodes × 16 processes
+(launcher: pbsdsh)` with node0 and node1 both starting. Multi-node launch on
+ABCI via pbsdsh is therefore confirmed to work, which is worth keeping even
+though the run produced nothing.
+
+**Every worker then exited immediately:**
+
+```
+❌ no slice_1.parquet or slice_1.txt in /out/phase1_single/node0/slices
+```
+
+The staging step wrote the slice as a symlink carrying an **absolute host
+path**:
+
+```bash
+ln -sf "${OD_EXP_OUT}/slices_p1/slice_1.parquet" "${dir}/slices/slice_1.parquet"
+```
+
+The worker reads that directory through a bind mount at `/out`, where the
+host path does not exist, so the file was simply absent. The `url_column`
+written beside it two lines earlier was **copied**, and survived. The two
+differed in nothing else.
+
+Fixed by `scripts/stage_node_slices.sh`, which copies. A relative symlink
+would also work, but only while every consumer resolves it the same way; a
+copy carries no such condition and the slices are a few megabytes.
+
+### Two other faults the same run exposed
+
+**The job reported success.** `Exit_status = 0` for a job that wrote nothing,
+so `qstat` said it had worked. The job now counts the shards it produced and
+exits non-zero when that count is zero.
+
+**`--env HOME=...` is refused by SingularityCE:**
+
+```
+WARNING: Overriding HOME environment variable with SINGULARITYENV_HOME is not permitted
+```
+
+It was doing nothing but emitting that warning three times per job — and had
+been doing so in experiment 0002 as well, which nonetheless ran for 1h38m
+without trouble. The flag is removed; `XDG_CACHE_HOME` is accepted and is
+what the caches follow. Home usage is now printed before and after each run
+so this stays a measured fact rather than an assumption. ABCI's container
+documentation does not cover HOME or automatic bind mounts, deferring to the
+SingularityCE guide.
+
+### What was changed to keep this from recurring
+
+The pieces were all individually tested; the job script that joins them had
+never been executed. That is the third bug of this shape in this project
+— after an assumed input format and a shard count that capped concurrency.
+
+`tests/stubs/singularity` now stands in for the container, so
+`tests/test_experiment_0003_job.py` runs the real job script end to end
+against a local HTTP server. Reverting the staging to `ln -sf` fails three
+tests.
+
+Honest limitation: the stub translates bind paths but does not isolate the
+filesystem, so it would **not** by itself have caught this bug — under the
+stub the absolute symlink still resolves. What catches it is the explicit
+pair of assertions that no staged path is an absolute symlink, and that the
+staged tree still works after being moved.
+
+### Next
+
+Re-run. The question the experiment exists for is still unanswered.

@@ -1,0 +1,176 @@
+"""Rehearse the whole 0003 job script locally, end to end.
+
+Experiment 0003 spent a queue slot and produced nothing: every phase ran,
+every worker started, and not one shard was written. The cause was a staged
+slice that did not resolve through the bind mount. No unit test could have
+seen it, because every unit was correct — the job script itself had never
+been executed.
+
+So it is executed here: the real job script, the real slicer, the real
+worker through img2dataset, the real analysis, against JPEGs served by a
+local HTTP server. `tests/stubs/singularity` stands in for the container and
+does the one thing that matters, translating bind paths.
+
+Single node, because pbsdsh needs a cluster. The multi-node launch is the one
+part this cannot rehearse, which is why the job runs the single-node phases
+first.
+
+Marked `integration`.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+from PIL import Image
+
+pytestmark = pytest.mark.integration
+
+REPO = Path(__file__).resolve().parent.parent
+STUBS = Path(__file__).resolve().parent / "stubs"
+JOB = REPO / "scripts" / "experiment_0003_job.sh"
+
+IMAGES = 60
+SLICE = 12          # URLs per phase; 3 phases → 36 of the 60
+TOTAL_PROCESSES = 2
+SAMPLES_PER_SHARD = 2   # 6 shards per phase, 3 per process
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def server(tmp_path_factory):
+    root = tmp_path_factory.mktemp("images")
+    for index in range(IMAGES):
+        buffer = io.BytesIO()
+        Image.new("RGB", (32, 32), (index * 4 % 256, 90, 160)).save(
+            buffer, format="JPEG")
+        (root / f"{index:04d}.jpg").write_bytes(buffer.getvalue())
+
+    port = free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        proc.terminate()
+        raise RuntimeError("server did not start")
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+@pytest.fixture(scope="module")
+def job_run(server, tmp_path_factory):
+    """Run the real job script once; every test reads its output."""
+    base = tmp_path_factory.mktemp("job0003")
+    urls_dir = base / "urls"
+    urls_dir.mkdir()
+    pq.write_table(
+        pa.table({"url": [f"{server}/{i:04d}.jpg" for i in range(IMAGES)]}),
+        urls_dir / "urls_clean.parquet",
+    )
+    exp_out = base / "out"
+    exp_out.mkdir()
+
+    env = {
+        **os.environ,
+        "PATH": f"{STUBS}:{os.environ['PATH']}",
+        "OD_SIF": str(base / "fake.sif"),
+        "OD_REPO": str(REPO),
+        "OD_URLS": str(urls_dir / "urls_clean.parquet"),
+        "OD_EXP_OUT": str(exp_out),
+        "OD_SLICE": str(SLICE),
+        "OD_TOTAL_PROCESSES": str(TOTAL_PROCESSES),
+        "OD_NODES": "1",
+        "OD_THREADS": "2",
+        "OD_SAMPLES_PER_SHARD": str(SAMPLES_PER_SHARD),
+        "PBS_LOCALDIR": str(base / "local"),
+    }
+    (base / "fake.sif").write_bytes(b"")
+    (base / "local").mkdir()
+
+    result = subprocess.run(["bash", str(JOB)], capture_output=True, text=True,
+                            env=env)
+    return result, exp_out
+
+
+def test_the_job_reports_success_only_when_it_produced_something(job_run) -> None:
+    """The previous run exited 0 having written nothing at all."""
+    result, _ = job_run
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "shards written: 0" not in result.stdout
+
+
+def test_every_phase_wrote_shards(job_run) -> None:
+    """The assertion that would have caught the staging bug.
+
+    Each phase ran and each worker started last time too; only the shards
+    were missing.
+    """
+    _, exp_out = job_run
+    for phase in ("phase1_single", "phase2_multi", "phase3_single"):
+        stats = list((exp_out / phase).rglob("*_stats.json"))
+        assert stats, f"{phase} produced no shard"
+
+
+def test_the_downloads_actually_succeeded(job_run) -> None:
+    """Served locally, so any failure is ours rather than the internet's."""
+    _, exp_out = job_run
+    successes = attempted = 0
+    for path in exp_out.rglob("*_stats.json"):
+        stats = json.loads(path.read_text())
+        successes += stats["successes"]
+        attempted += stats["count"]
+    assert attempted == SLICE * 3, f"attempted {attempted}, expected {SLICE * 3}"
+    assert successes == attempted, f"only {successes}/{attempted} succeeded"
+
+
+def test_the_phases_used_disjoint_urls(job_run) -> None:
+    """Offsets exist so no phase warms remote caches for the next one."""
+    _, exp_out = job_run
+    seen: list[str] = []
+    for name in ("slices_p1", "slices_p2", "slices_p3"):
+        for slice_file in sorted((exp_out / name).glob("*.parquet")):
+            seen += pq.read_table(slice_file).column("url").to_pylist()
+    assert len(seen) == len(set(seen)), "phases share URLs"
+
+
+def test_no_staged_slice_is_an_absolute_symlink(job_run) -> None:
+    _, exp_out = job_run
+    for path in exp_out.rglob("slice_1.parquet"):
+        if path.is_symlink():
+            assert not os.readlink(path).startswith("/"), path
+
+
+def test_the_analysis_reads_the_job_output_back(job_run) -> None:
+    _, exp_out = job_run
+    result = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "analyse_experiment_0003.py"),
+         str(exp_out)],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "pre-registered criteria" in result.stdout
+    assert "NOT RUN" not in result.stdout, "every phase ran; none should be absent"

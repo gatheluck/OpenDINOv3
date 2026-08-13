@@ -64,7 +64,15 @@ fi
 
 BINDS=(--bind "${OD_REPO}:/work:ro" --bind "${URL_BIND}:/urls:ro"
        --bind "${OD_EXP_OUT}:/out" --bind "${SCRATCH}:/scratch")
-ENVS=(--env "HOME=/scratch" --env "XDG_CACHE_HOME=/scratch/cache")
+# HOME is deliberately NOT passed. SingularityCE refuses it:
+#   "Overriding HOME environment variable with SINGULARITYENV_HOME is not
+#    permitted"
+# so `--env HOME=...` only produces that warning three times per job and
+# changes nothing. XDG_CACHE_HOME is accepted and is what the caches follow.
+# Home usage is reported below so that this stays a measured fact.
+ENVS=(--env "XDG_CACHE_HOME=/scratch/cache")
+
+echo "home before: $(df -h "${HOME}" 2>/dev/null | tail -1)"
 
 PER_NODE_MULTI=$((OD_TOTAL_PROCESSES / OD_NODES))
 URLS_PER_NODE_MULTI=$((OD_SLICE / OD_NODES))
@@ -102,9 +110,11 @@ echo
 write_node_script() {   # $1 phase  $2 node index  $3 slice file  $4 processes
   local phase="$1" k="$2" slice_src="$3" procs="$4"
   local dir="${OD_EXP_OUT}/${phase}/node${k}"
-  mkdir -p "${dir}/slices"
-  cp "${OD_EXP_OUT}/${slice_src%/*}/url_column" "${dir}/slices/url_column"
-  ln -sf "${OD_EXP_OUT}/${slice_src}" "${dir}/slices/slice_1.parquet"
+  mkdir -p "${dir}"
+  # Copies, never links. An absolute symlink does not resolve through the
+  # bind mount the worker reads it under; see scripts/stage_node_slices.sh.
+  bash "${OD_REPO}/scripts/stage_node_slices.sh" \
+    "${OD_EXP_OUT}" "${phase}" "${k}" "${slice_src}" >/dev/null || return 1
   cat > "${dir}/run.sh" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
@@ -194,8 +204,25 @@ run_phase_single phase3_single "slices_p3/slice_1.parquet" "${OD_TOTAL_PROCESSES
 
 echo
 echo "──────────────────────────────────────────────────────────"
+echo "home after : $(df -h "${HOME}" 2>/dev/null | tail -1)"
+
+# The previous run exited 0 having produced no shards at all, so qstat
+# reported success for a job that measured nothing. Count what was written
+# and let the exit status say so.
+SHARDS=$(find "${OD_EXP_OUT}" -name '*_stats.json' 2>/dev/null | wc -l | tr -d ' ')
+echo "shards written: ${SHARDS}"
+if [ "${SHARDS}" -eq 0 ]; then
+  echo "❌ no shard was written by any phase. The job did nothing." >&2
+  echo "   Look at */node*/worker.log for the reason." >&2
+  FINAL_RC=1
+else
+  FINAL_RC=0
+fi
+
 echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo
 echo "Analyse on the login node with:"
 echo "  singularity exec --bind ${OD_REPO}:/work:ro --bind ${OD_EXP_OUT}:/out:ro \\"
 echo "    ${OD_SIF} python /work/scripts/analyse_experiment_0003.py /out"
+
+exit "${FINAL_RC}"

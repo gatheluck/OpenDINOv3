@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""A stand-in for `singularity exec`, so a job script can be rehearsed locally.
+
+WHY
+
+Three bugs in this project reached the cluster because the pieces were tested
+and the seams between them were not: an input format assumed rather than
+checked, a shard count that capped concurrency, and a staged slice that did
+not resolve through a bind mount. Each cost hours of queue wait.
+
+The job scripts are the seam. This stub makes them runnable without a
+cluster: it reads the `--bind host:container` pairs off the command line and
+rewrites container paths back to host paths, then runs the command directly.
+
+WHAT IT DOES NOT DO
+
+It is not a container. No isolation, no image, no separate filesystem. It
+answers one question — "would this command see the files it expects, given
+these binds?" — which is precisely the question the staging bug got wrong.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if not args or args[0] != "exec":
+        print(f"stub singularity: only 'exec' is supported, got {args[:1]}",
+              file=sys.stderr)
+        return 2
+    args = args[1:]
+
+    binds: list[tuple[str, str]] = []   # (container path, host path)
+    env = dict(os.environ)
+
+    while args:
+        head = args[0]
+        if head == "--bind":
+            parts = args[1].split(":")
+            host, container = parts[0], (parts[1] if len(parts) > 1 else parts[0])
+            binds.append((container, host))
+            args = args[2:]
+        elif head == "--env":
+            key, _, value = args[1].partition("=")
+            env[key] = value
+            args = args[2:]
+        elif head in ("--home", "-H"):
+            args = args[2:]
+        elif head.startswith("-"):
+            args = args[1:]
+        else:
+            break
+
+    if len(args) < 2:
+        print("stub singularity: expected <image> <command...>", file=sys.stderr)
+        return 2
+    command = args[1:]          # args[0] is the image, which has no meaning here
+
+    # Longest container path first, so /out/slices does not match before
+    # /out/slices/deeper when both are bound.
+    binds.sort(key=lambda pair: -len(pair[0]))
+
+    def to_host(value: str) -> str:
+        for container, host in binds:
+            if value == container:
+                return host
+            if value.startswith(container + "/"):
+                return host + value[len(container):]
+        return value
+
+    command = [to_host(part) for part in command]
+    for key, value in list(env.items()):
+        if key.startswith("OD_") or key in ("XDG_CACHE_HOME", "HOME"):
+            env[key] = to_host(value)
+
+    return subprocess.call(command, env=env)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
