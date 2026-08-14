@@ -31,7 +31,22 @@ ATTEMPT_TAG="${OD_ATTEMPT_TAG:-${PBS_JOBID:-manual}}"
 # that move it. The defaults are what that wave ran, so nothing changes unless
 # an experiment sets them.
 TIMEOUT="${OD_TIMEOUT:-10}"
-RETRIES="${OD_RETRIES:-2}"
+# retries=0, chosen by experiment 0004 on four equal 100,000-URL slices.
+# Measured, not reasoned:
+#
+#   threads retries   yield    unreachable   URLs/s
+#        32       2   64.9%         0.312%    105.3   <- the first wave
+#        32       0   64.7%         0.135%    348.4   <- this
+#       128       2   64.0%         0.621%    160.3
+#       128       0   58.7%         2.993%      —     rejected by the guard
+#
+# 3.31x the throughput for 0.2 points of yield, and it more than halves the
+# unreachable rate rather than raising it. Retrying was close to pure waste:
+# the failures are 403, 404 and DNS, which never succeed on a second attempt,
+# and each dead URL held a thread for three timeouts instead of one.
+#
+# 128 threads is worse on both axes and is not a knob worth turning.
+RETRIES="${OD_RETRIES:-0}"
 # Cap the manifest so an experiment arm finishes inside its walltime. Without
 # it an arm measures how long a kill takes, not how fast the setting is.
 MAX_URLS="${OD_MAX_URLS:-0}"
