@@ -31,6 +31,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   inspect            what the upstream metadata schema holds
   resolution         how large the images are, before downloading any
   verify             does what arrived match what the metadata claimed
+  submit --from N --to M   send one production wave to the queue
   plan               partition the metadata into tasks, writing plan.json
   assess <task dir>  whether a finished task is worth keeping
   exec <script> ...  any script in scripts/, with the standard binds
@@ -87,6 +88,21 @@ case "${SUBCOMMAND}" in
       --files "${OD_SAMPLE_FILES:-40}" \
       --baseline "$(in_out "${PRODUCTION}")/resolution.json" \
       --json "$(in_out "${PRODUCTION}")/verify_sizes.json" "$@"
+    ;;
+  submit)
+    # NOT through the container: qsub does not exist inside the image.
+    # OD_PLAN and OD_META_ROOT are derived here because passing them inline
+    # makes a 152-character command, which does not survive a paste.
+    OD_PLAN="${OD_PLAN:-${PRODUCTION}/plan.json}"
+    [ -f "${OD_PLAN}" ] || die "no plan at ${OD_PLAN}. Run: bash scripts/od.sh plan"
+    export OD_PLAN
+    export OD_META_ROOT="${OD_META_ROOT:-${METADATA}}"
+    # Same derivation env.local.sh uses, so the two cannot drift.
+    export OD_LOGDIR="${OD_LOGDIR:-${OD_OUT_ROOT}/logs/pbs_stdout}"
+    # od.sh consumes --dry-run before dispatch; forward it explicitly or a
+    # rehearsal would submit for real.
+    [ "${DRY_RUN}" -eq 1 ] && set -- "$@" --dry-run
+    exec bash "${REPO}/scripts/submit_production.sh" "$@"
     ;;
   plan)
     run python /work/scripts/plan_partition.py "$(in_corpus "${METADATA}")" \
