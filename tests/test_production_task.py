@@ -246,3 +246,66 @@ def test_captions_reach_the_shards(workspace) -> None:
         caption = archive.extractfile(
             next(n for n in names if n.endswith(".txt"))).read().decode()
     assert caption.startswith("caption "), caption
+
+
+def test_carrying_a_column_img2dataset_writes_itself_is_refused(workspace
+                                                                ) -> None:
+    """img2dataset appends `key`, `status`, `error_message`, `width`,
+    `height`, `original_width` and `original_height` to the input schema.
+
+    Carrying an upstream column of the same name puts two fields with one
+    name in the output schema. The writer's buffer is `{k: [] for k in
+    schema.names}`, so the duplicate collapses to one key that receives two
+    appends per row while every other key receives one. The rows then
+    misalign and pyarrow raises `Expected bytes, got a 'int' object` — at
+    *write* time, meaning after a shard has been downloaded in full, on every
+    shard, for the whole run.
+
+    Carrying `width` is an obvious thing to want, so this refuses up front
+    rather than 23 TB later.
+    """
+    plan, task_root = workspace
+    result = run_task(plan, task_root, OD_CARRY_COLUMNS="uid width")
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "width" in combined
+    assert "img2dataset" in combined
+
+
+def test_the_columns_carried_are_still_the_ones_we_want(workspace) -> None:
+    """The guard must not have been bought by carrying nothing.
+
+    Asserted against the shard's own parquet, not the log: `uid` appears in
+    the "manifest columns" line whether or not it was ever carried, so a log
+    check would pass for the wrong reason.
+    """
+    import pyarrow.parquet as pq
+    plan, task_root = workspace
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    shard = sorted((task_root / "task-000000" / "shards").glob("*.parquet"))[0]
+    names = pq.ParquetFile(shard).schema_arrow.names
+    assert "uid" in names, f"uid was not carried into the shard: {names}"
+    # And what img2dataset writes itself is there exactly once.
+    assert names.count("width") == 1, names
+
+
+def test_skipping_reencode_is_refused_while_blurring(workspace) -> None:
+    """The combination that silently publishes unblurred faces.
+
+    Pinned upstream by test_skip_reencode_silently_discards_face_blurring:
+    with --resize_mode no, the blur is computed and then the original bytes
+    are written. Every recorded field still looks correct, so nothing
+    downstream would ever notice.
+    """
+    plan, task_root = workspace
+    result = run_task(plan, task_root, blur="1", OD_SKIP_REENCODE="1")
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "OD_SKIP_REENCODE" in combined
+    assert "unblurred" in combined
+    # It must stop HERE. Printing the warning and falling through to the
+    # next guard would also exit non-zero with this message on screen, so
+    # without this the test passes with the guard removed.
+    assert "no face_bboxes column" not in combined, (
+        "fell through to a later guard instead of stopping")

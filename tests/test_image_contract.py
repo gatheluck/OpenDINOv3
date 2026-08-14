@@ -58,3 +58,47 @@ def test_shard_toolchain_importable(module: str) -> None:
     back for validation requires pyarrow and an image decoder.
     """
     __import__(module)
+
+
+def test_skip_reencode_silently_discards_face_blurring() -> None:
+    """Pinning an upstream behaviour we must not walk into.
+
+    With `resize_mode=no` neither resize branch runs, so `encode_needed` is
+    never set to True by the blur path. It is decided earlier, by
+    `skip_reencode`. If that is on and the source is already JPEG, the
+    resizer blurs the decoded array, then writes `img_buf` — the ORIGINAL
+    bytes — and reports the blurred array's dimensions, so the output looks
+    correct in every recorded field while being unblurred.
+
+    No error, no warning. The documented img2dataset recipes for COYO-700M
+    and LAION both pass `--skip_reencode=True`, so this is one plausible
+    speed optimisation away from silently publishing unblurred faces.
+
+    If this test starts failing, upstream has fixed it and the guard in
+    production_task.sh can be revisited.
+    """
+    import io
+    from PIL import Image
+    from img2dataset.blurrer import BoundingBoxBlurrer
+    from img2dataset.resizer import Resizer
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (128, 128), (10, 200, 30)).save(buffer, format="JPEG")
+    original = buffer.getvalue()
+    bbox = [[0.1, 0.1, 0.6, 0.6]]
+
+    def blurred_bytes(skip_reencode: bool) -> bytes:
+        resizer = Resizer(image_size=256, resize_mode="no",
+                          resize_only_if_bigger=False,
+                          skip_reencode=skip_reencode,
+                          blurrer=BoundingBoxBlurrer())
+        out, _, _, _, _, err = resizer(io.BytesIO(original),
+                                       blurring_bbox_list=bbox)
+        assert err is None, err
+        return out
+
+    assert blurred_bytes(False) != original, (
+        "blurring must change the bytes when re-encoding is on")
+    assert blurred_bytes(True) == original, (
+        "upstream behaviour changed: skip_reencode no longer discards the "
+        "blur. Revisit the guard in production_task.sh.")

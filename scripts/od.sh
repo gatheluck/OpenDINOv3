@@ -29,6 +29,7 @@ usage() {
 usage: od.sh [--dry-run] <subcommand> [args...]
 
   inspect            what the upstream metadata schema holds
+  resolution         how large the images are, before downloading any
   plan               partition the metadata into tasks, writing plan.json
   assess <task dir>  whether a finished task is worth keeping
   exec <script> ...  any script in scripts/, with the standard binds
@@ -73,6 +74,11 @@ SUBCOMMAND="$1"; shift
 case "${SUBCOMMAND}" in
   inspect)
     run python /work/scripts/inspect_metadata.py "$(in_corpus "${METADATA}")" "$@"
+    ;;
+  resolution)
+    run python /work/scripts/measure_resolution.py "$(in_corpus "${METADATA}")" \
+      --files "${OD_SAMPLE_FILES:-40}" \
+      --json "$(in_out "${PRODUCTION}")/resolution.json" "$@"
     ;;
   plan)
     run python /work/scripts/plan_partition.py "$(in_corpus "${METADATA}")" \
