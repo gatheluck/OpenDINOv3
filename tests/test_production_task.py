@@ -288,3 +288,24 @@ def test_the_columns_carried_are_still_the_ones_we_want(workspace) -> None:
     assert "uid" in names, f"uid was not carried into the shard: {names}"
     # And what img2dataset writes itself is there exactly once.
     assert names.count("width") == 1, names
+
+
+def test_skipping_reencode_is_refused_while_blurring(workspace) -> None:
+    """The combination that silently publishes unblurred faces.
+
+    Pinned upstream by test_skip_reencode_silently_discards_face_blurring:
+    with --resize_mode no, the blur is computed and then the original bytes
+    are written. Every recorded field still looks correct, so nothing
+    downstream would ever notice.
+    """
+    plan, task_root = workspace
+    result = run_task(plan, task_root, blur="1", OD_SKIP_REENCODE="1")
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "OD_SKIP_REENCODE" in combined
+    assert "unblurred" in combined
+    # It must stop HERE. Printing the warning and falling through to the
+    # next guard would also exit non-zero with this message on screen, so
+    # without this the test passes with the guard removed.
+    assert "no face_bboxes column" not in combined, (
+        "fell through to a later guard instead of stopping")

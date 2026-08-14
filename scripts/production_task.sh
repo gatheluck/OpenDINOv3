@@ -107,7 +107,7 @@ print(' '.join(pq.ParquetFile(sys.argv[1]).schema_arrow.names))
   echo "❌ cannot read the manifest schema" >&2; exit 1; }
 echo "manifest columns: ${COLUMNS}"
 
-CAPTION_ARGS=() ; EXTRA_ARGS=() ; BLUR_ARGS=()
+CAPTION_ARGS=() ; EXTRA_ARGS=() ; BLUR_ARGS=() ; REENCODE_ARGS=()
 case " ${COLUMNS} " in
   *" text "*) CAPTION_ARGS=(--caption_col text) ;;
   *) echo "⚠️  no caption column: this task's shards will hold no text." >&2 ;;
@@ -141,6 +141,26 @@ done
 [ -n "${keep}" ] && EXTRA_ARGS=(--save_additional_columns "[${keep}]")
 
 if [ "${OD_BLUR_FACES}" = "1" ]; then
+  # Checked before the column check: this is a contradiction in the request
+  # itself, true whatever the manifest happens to hold.
+  #
+  # With --resize_mode no, neither resize branch runs, so nothing sets
+  # `encode_needed`. It was already decided by skip_reencode. Turn that on
+  # and the resizer blurs the decoded array, then writes the ORIGINAL bytes
+  # and reports the blurred array's dimensions: every recorded field looks
+  # right and the image is unblurred. No error, no warning.
+  #
+  # The documented img2dataset recipes for COYO-700M and LAION both pass
+  # --skip_reencode=True, so this is one plausible speed optimisation away.
+  # Pinned by test_skip_reencode_silently_discards_face_blurring.
+  if [ "${OD_SKIP_REENCODE:-0}" = "1" ]; then
+    echo "❌ OD_SKIP_REENCODE=1 cannot be combined with OD_BLUR_FACES=1." >&2
+    echo "   img2dataset would compute the blur and then write the" >&2
+    echo "   original unblurred bytes, silently. Faces would not be" >&2
+    echo "   blurred and nothing would say so." >&2
+    exit 2
+  fi
+
   case " ${COLUMNS} " in
     *" face_bboxes "*) BLUR_ARGS=(--bbox_col face_bboxes) ;;
     *) echo "❌ OD_BLUR_FACES=1 but the manifest has no face_bboxes column." >&2
@@ -148,6 +168,7 @@ if [ "${OD_BLUR_FACES}" = "1" ]; then
        exit 2 ;;
   esac
 fi
+[ "${OD_SKIP_REENCODE:-0}" = "1" ] && REENCODE_ARGS=(--skip_reencode True)
 
 t0=$(date +%s)
 img2dataset \
@@ -157,6 +178,7 @@ img2dataset \
   "${CAPTION_ARGS[@]}" \
   "${EXTRA_ARGS[@]}" \
   "${BLUR_ARGS[@]}" \
+  "${REENCODE_ARGS[@]}" \
   --output_folder "${TASK_DIR}/shards" \
   --output_format webdataset \
   --image_size 256 \
