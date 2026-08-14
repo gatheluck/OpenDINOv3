@@ -92,9 +92,17 @@ echo "started     : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # Subjobs get requeued and waves get resubmitted. Re-downloading a finished
 # task would waste a node-hour and replace good data with whatever the web
 # returns today.
+# A task capped by OD_MAX_URLS holds a fraction of the URLs the plan allots
+# it. Experiment 0004 left three such tasks marked complete, which would
+# have silently dropped 2.7 million URLs from the corpus. The marker records
+# what it is, and a partial one does not count as done.
 if [ -f "${TASK_DIR}/DONE.json" ]; then
-  echo "already complete; nothing to do"
-  exit 0
+  if grep -q '"partial": true' "${TASK_DIR}/DONE.json" 2>/dev/null; then
+    echo "⚠️  previously completed with a capped manifest; redoing in full"
+  else
+    echo "already complete; nothing to do"
+    exit 0
+  fi
 fi
 
 # --- a previous attempt left something behind --------------------------------
@@ -121,6 +129,11 @@ python "${REPO}/scripts/build_task_manifest.py" \
   --plan "${OD_PLAN}" --task-id "${OD_TASK_ID}" \
   --output "${TASK_DIR}/urls.parquet" || {
     echo "❌ task ${OD_TASK_ID}: could not build the manifest" >&2; exit 1; }
+
+PLANNED_URLS=$(python -c "
+import pyarrow.parquet as pq, sys
+print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)
+" "${TASK_DIR}/urls.parquet") || PLANNED_URLS=0
 
 if [ "${MAX_URLS}" -gt 0 ]; then
   python "${REPO}/scripts/cap_manifest.py" \
@@ -269,15 +282,20 @@ fi
 # --- done --------------------------------------------------------------------
 python - "${TASK_DIR}" "${OD_TASK_ID}" "$((t1 - t0))" \
         "${PROCESSES}" "${THREADS}" "${SAMPLES_PER_SHARD}" \
-        "${TIMEOUT}" "${RETRIES}" <<'PY'
+        "${TIMEOUT}" "${RETRIES}" "${PLANNED_URLS}" <<'PY'
 import json, sys, datetime, pathlib
-task_dir, task_id, wall, procs, threads, sps, timeout, retries = sys.argv[1:9]
+(task_dir, task_id, wall, procs, threads, sps, timeout, retries,
+ planned) = sys.argv[1:10]
 health = json.loads((pathlib.Path(task_dir) / "health.json").read_text())
 (pathlib.Path(task_dir) / "DONE.json").write_text(json.dumps({
     "task_id": int(task_id),
     "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "wall_seconds": int(wall),
     "candidates": health["candidates"],
+    "planned_candidates": int(planned),
+    # True when the manifest was capped, so this task holds a fraction of
+    # what the plan allots it and a later wave must redo it in full.
+    "partial": int(planned) > 0 and health["candidates"] < int(planned),
     "successes": health["successes"],
     "yield": health["yield_rate"],
     "settings": {"processes": int(procs), "threads": int(threads),
