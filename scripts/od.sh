@@ -30,6 +30,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
 
   inspect            what the upstream metadata schema holds
   resolution         how large the images are, before downloading any
+  verify             does what arrived match what the metadata claimed
   plan               partition the metadata into tasks, writing plan.json
   assess <task dir>  whether a finished task is worth keeping
   exec <script> ...  any script in scripts/, with the standard binds
@@ -79,6 +80,13 @@ case "${SUBCOMMAND}" in
     run python /work/scripts/measure_resolution.py "$(in_corpus "${METADATA}")" \
       --files "${OD_SAMPLE_FILES:-40}" \
       --json "$(in_out "${PRODUCTION}")/resolution.json" "$@"
+    ;;
+  verify)
+    run python /work/scripts/verify_recorded_sizes.py \
+      "$(in_corpus "${OD_SHARDS:-${OD_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
+      --files "${OD_SAMPLE_FILES:-40}" \
+      --baseline "$(in_out "${PRODUCTION}")/resolution.json" \
+      --json "$(in_out "${PRODUCTION}")/verify_sizes.json" "$@"
     ;;
   plan)
     run python /work/scripts/plan_partition.py "$(in_corpus "${METADATA}")" \
