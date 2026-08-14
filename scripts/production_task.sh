@@ -25,6 +25,31 @@ THREADS="${OD_THREADS:-32}"
 SAMPLES_PER_SHARD="${OD_SAMPLES_PER_SHARD:-10000}"
 ATTEMPT_TAG="${OD_ATTEMPT_TAG:-${PBS_JOBID:-manual}}"
 
+# Face blurring has no default on purpose. It is irreversible, it applies to
+# 902 million images, and it is a legal question rather than a technical one.
+# DataComp's own downloader blurs by default; a silent default either way
+# would decide that by accident, so the run refuses until it is stated.
+if [ "${OD_BLUR_FACES:-unset}" = "unset" ]; then
+  {
+    echo "❌ OD_BLUR_FACES is not set."
+    echo
+    echo "   DataComp's own downloader blurs faces by default, using the"
+    echo "   face_bboxes column. Blurring cannot be undone without"
+    echo "   re-downloading, so it has to be chosen rather than defaulted:"
+    echo
+    echo "     OD_BLUR_FACES=1   blur, as DataComp does"
+    echo "     OD_BLUR_FACES=0   keep the image as fetched"
+    echo
+    echo "   Either way face_bboxes is stored with the sample, so blurring"
+    echo "   later remains possible without fetching anything again."
+  } >&2
+  exit 2
+fi
+case "${OD_BLUR_FACES}" in
+  0|1) ;;
+  *) echo "❌ OD_BLUR_FACES must be 0 or 1, got '${OD_BLUR_FACES}'" >&2; exit 2 ;;
+esac
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TASK_DIR=$(printf '%s/task-%06d' "${OD_TASK_ROOT}" "${OD_TASK_ID}")
 
@@ -32,6 +57,7 @@ echo "task        : ${OD_TASK_ID}"
 echo "directory   : ${TASK_DIR}"
 echo "processes   : ${PROCESSES} (threads ${THREADS})"
 echo "shard       : ${SAMPLES_PER_SHARD} samples"
+echo "blur faces  : ${OD_BLUR_FACES}"
 echo "started     : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # --- already done? -----------------------------------------------------------
@@ -70,11 +96,46 @@ python "${REPO}/scripts/build_task_manifest.py" \
 
 # --- download ----------------------------------------------------------------
 echo "──────────────────────────────────────────────────────────"
+# The same column names DataComp's own download_upstream.py passes — but
+# only for the columns this manifest actually has. The manifest carries what
+# upstream ships and skips what it does not, so naming a missing column here
+# would make img2dataset fail on metadata that is merely older or derivative.
+COLUMNS=$(python -c "
+import pyarrow.parquet as pq, sys
+print(' '.join(pq.ParquetFile(sys.argv[1]).schema_arrow.names))
+" "${TASK_DIR}/urls.parquet") || {
+  echo "❌ cannot read the manifest schema" >&2; exit 1; }
+echo "manifest columns: ${COLUMNS}"
+
+CAPTION_ARGS=() ; EXTRA_ARGS=() ; BLUR_ARGS=()
+case " ${COLUMNS} " in
+  *" text "*) CAPTION_ARGS=(--caption_col text) ;;
+  *) echo "⚠️  no caption column: this task's shards will hold no text." >&2 ;;
+esac
+
+keep=""
+for column in uid face_bboxes; do
+  case " ${COLUMNS} " in *" ${column} "*) keep="${keep:+${keep},}\"${column}\"" ;; esac
+done
+[ -n "${keep}" ] && EXTRA_ARGS=(--save_additional_columns "[${keep}]")
+
+if [ "${OD_BLUR_FACES}" = "1" ]; then
+  case " ${COLUMNS} " in
+    *" face_bboxes "*) BLUR_ARGS=(--bbox_col face_bboxes) ;;
+    *) echo "❌ OD_BLUR_FACES=1 but the manifest has no face_bboxes column." >&2
+       echo "   Blurring was asked for and cannot be done." >&2
+       exit 2 ;;
+  esac
+fi
+
 t0=$(date +%s)
 img2dataset \
   --url_list "${TASK_DIR}/urls.parquet" \
   --input_format parquet \
   --url_col url \
+  "${CAPTION_ARGS[@]}" \
+  "${EXTRA_ARGS[@]}" \
+  "${BLUR_ARGS[@]}" \
   --output_folder "${TASK_DIR}/shards" \
   --output_format webdataset \
   --image_size 256 \

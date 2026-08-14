@@ -81,6 +81,7 @@ def workspace(server, tmp_path):
     source = meta / "a.parquet"
     pq.write_table(pa.table({
         "url": [f"{server}/{i:04d}.jpg" for i in range(IMAGES)],
+        "text": [f"caption {i}" for i in range(IMAGES)],
         "uid": [f"{i:09d}" for i in range(IMAGES)],
     }), source)
 
@@ -109,6 +110,7 @@ def run_task(plan: Path, task_root: Path, task_id: int = 0, **extra):
         "OD_THREADS": "2",
         "OD_SAMPLES_PER_SHARD": "4",
         "OD_ATTEMPT_TAG": extra.pop("attempt", "test"),
+        "OD_BLUR_FACES": extra.pop("blur", "0"),
         **extra,
     }
     return subprocess.run(["bash", str(RUNNER)], capture_output=True,
@@ -197,3 +199,50 @@ def test_an_unhealthy_task_is_not_marked_done(workspace) -> None:
     task_dir = task_root / "task-000000"
     assert not (task_dir / "DONE.json").exists()
     assert (task_dir / "health.json").is_file(), "the verdict must be kept"
+
+
+def test_the_run_refuses_until_face_blurring_is_chosen(workspace) -> None:
+    """Irreversible, 902 million images, and a legal question.
+
+    DataComp blurs by default. A default either way here would settle that
+    by accident, so the run stops and says so.
+    """
+    plan, task_root = workspace
+    env = {
+        **os.environ,
+        "OD_PLAN": str(plan), "OD_TASK_ID": "0",
+        "OD_TASK_ROOT": str(task_root), "OD_PROCESSES": "2",
+        "OD_THREADS": "2", "OD_SAMPLES_PER_SHARD": "4",
+    }
+    env.pop("OD_BLUR_FACES", None)
+    result = subprocess.run(["bash", str(RUNNER)], capture_output=True,
+                            text=True, env=env)
+    assert result.returncode != 0
+    assert "OD_BLUR_FACES is not set" in result.stderr
+    assert not (task_root / "task-000000").exists(), "nothing should be written"
+
+
+def test_an_invalid_blur_setting_is_refused(workspace) -> None:
+    plan, task_root = workspace
+    result = run_task(plan, task_root, blur="maybe")
+    assert result.returncode != 0
+    assert "must be 0 or 1" in result.stderr
+
+
+def test_captions_reach_the_shards(workspace) -> None:
+    """The whole point of carrying the text column.
+
+    Without --caption_col the tar holds .jpg and .json only, and the corpus
+    cannot train anything text-conditioned.
+    """
+    import tarfile
+    plan, task_root = workspace
+    assert run_task(plan, task_root).returncode == 0
+    tar = sorted((task_root / "task-000000" / "shards").glob("*.tar"))[0]
+    with tarfile.open(tar) as archive:
+        names = archive.getnames()
+        suffixes = {n.rsplit(".", 1)[-1] for n in names}
+        assert "txt" in suffixes, f"no captions in the shard: {sorted(suffixes)}"
+        caption = archive.extractfile(
+            next(n for n in names if n.endswith(".txt"))).read().decode()
+    assert caption.startswith("caption "), caption

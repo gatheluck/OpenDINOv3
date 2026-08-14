@@ -44,6 +44,33 @@ only control. It doubles as the ramp: 0003 measured one and two nodes and
 nothing above, so the first wave is small and its yield is checked before the
 next.
 
+## What each sample carries, and one irreversible choice
+
+DataComp's own `download_upstream.py` passes these to img2dataset, and this
+run passes the same:
+
+| Argument | Value | Why |
+|---|---|---|
+| `--url_col` | `url` | the image |
+| `--caption_col` | **`text`** | DINOv3 needs none, but the text-to-image stage video models train first cannot be done without it |
+| `--save_additional_columns` | `uid`, `face_bboxes` | `uid` traces a sample back upstream; `face_bboxes` keeps blurring possible later |
+
+Carrying only the URL — which an earlier draft of this pipeline did — would
+have produced 23 TB with no captions, deciding by omission whether the corpus
+can serve a text-conditioned model.
+
+### Face blurring has no default
+
+`OD_BLUR_FACES` must be set to `0` or `1`; the run refuses otherwise.
+
+DataComp blurs by default, using `face_bboxes`. Blurring is **irreversible**
+without re-downloading, it applies to roughly 902 million images, and it is a
+legal question rather than a technical one. A default either way would settle
+that by accident.
+
+`face_bboxes` is stored with every sample regardless, so choosing `0` now
+does not close the door on blurring later.
+
 ## The health guard
 
 On 2026-07-28 a day-long loss of external connectivity destroyed 474 tasks.

@@ -23,10 +23,24 @@ import pyarrow.parquet as pq
 
 from .urllist import URL_COLUMN_NAMES
 
-#: Only what img2dataset needs. Carrying the upstream schema would inflate
-#: every manifest and tie the corpus to whatever columns upstream happens to
-#: ship.
-OUTPUT_COLUMN = "url"
+#: What DataComp's own downloader carries, and why each is needed.
+#:
+#:   url          the image, obviously
+#:   text         the caption. DataComp passes caption_col="text". DINOv3 is
+#:                self-supervised and needs none, but the text-to-image stage
+#:                that video models train first cannot be done without it, so
+#:                dropping it would decide that question by accident.
+#:   uid          DataComp's identifier, kept via save_additional_columns. It
+#:                is how a sample is traced back to upstream.
+#:   face_bboxes  DataComp blurs faces by default using this. Blurring is
+#:                irreversible and is a decision for later — but only if the
+#:                boxes were kept.
+#:
+#: Anything else upstream ships (CLIP scores, NSFW scores, dedup scores) is
+#: left behind: it would inflate every manifest and is recoverable from
+#: upstream by uid.
+URL_COLUMN = "url"
+CARRIED_COLUMNS = ("url", "text", "uid", "face_bboxes")
 
 Piece = tuple[str, int, int]   # (path, start row, end row exclusive)
 
@@ -68,10 +82,17 @@ def build_manifest(pieces: Sequence[Piece]) -> pa.Table:
                 "one of them is stale."
             )
 
-        column = _url_column(handle.schema_arrow.names, path)
-        table = pq.read_table(path, columns=[column]).slice(start, end - start)
-        if column != OUTPUT_COLUMN:
-            table = table.rename_columns([OUTPUT_COLUMN])
+        names = list(handle.schema_arrow.names)
+        url = _url_column(names, path)
+
+        # Optional columns are carried when upstream has them and skipped
+        # when it does not: derivative metadata sets differ, and a missing
+        # caption is a fact about the source rather than an error here.
+        wanted = [url] + [c for c in CARRIED_COLUMNS
+                          if c != URL_COLUMN and c in names]
+        table = pq.read_table(path, columns=wanted).slice(start, end - start)
+        if url != URL_COLUMN:
+            table = table.rename_columns([URL_COLUMN] + wanted[1:])
         chunks.append(table)
 
     return chunks[0] if len(chunks) == 1 else pa.concat_tables(chunks)
