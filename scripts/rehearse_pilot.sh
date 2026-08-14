@@ -148,12 +148,38 @@ else
   fail "OD_BLUR_FACES is not exported by the generated job"
 fi
 
+# The array range, through a qsub that enforces what ABCI's qsub enforces.
+# ABCI rejected -J 0-7 with "Array job indices must be greater than 0" only
+# after a plan, a wave and a wait; the stub costs nothing.
+if OD_SUBMIT="${REPO}/tests/stubs/od_qsub_stub" \
+   bash "${REPO}/scripts/submit_production.sh" --from 0 --to 2 \
+   > "${WORK}/qsub.log" 2>&1; then
+  pass "qsub accepted the array range ($(grep -o '\-J [0-9-]*' "${WORK}/qsub.log" | tail -1))"
+else
+  fail "qsub rejected the array range"
+  sed 's/^/    /' "${WORK}/qsub.log" | tail -6
+fi
+
 # --- 3. the subjob, with real container isolation ---------------------------
 step "3. the subjob (singularity -> docker, no env inheritance)"
 ln -sf "${REPO}/tests/stubs/singularity_docker" "${SHIM}/singularity"
-PATH="${SHIM}:${PATH}" PBS_ARRAY_INDEX=0 bash "${JOB}" \
+PATH="${SHIM}:${PATH}" PBS_ARRAY_INDEX=1 bash "${JOB}" \
   > "${WORK}/job.log" 2>&1
 JOB_RC=$?
+
+# The off-by-one that would silently run the wrong task for every subjob.
+if grep -qE "^task      : 0$" "${WORK}/job.log"; then
+  pass "PBS index 1 resolved to plan task 0"
+else
+  fail "PBS index 1 did not resolve to plan task 0"
+  grep -E "^(array idx|task)" "${WORK}/job.log" | sed 's/^/    /'
+fi
+
+if PATH="${SHIM}:${PATH}" PBS_ARRAY_INDEX=0 bash "${JOB}" >/dev/null 2>&1; then
+  fail "array index 0 was accepted; the offset is not being applied"
+else
+  pass "array index 0 is refused (offset would give a negative task)"
+fi
 
 if [ "${JOB_RC}" -eq 0 ]; then
   pass "the subjob completed"
