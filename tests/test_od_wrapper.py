@@ -54,6 +54,10 @@ def write_plan(env, tasks: int = 8) -> Path:
                                 "tasks": [{"task_id": i, "rows": 1,
                                            "pieces": []}
                                           for i in range(tasks)]}))
+    # submit_production.sh refuses a wave that has not stated face
+    # blurring, because the generated job script is the only channel to the
+    # compute node. These tests are about path derivation, so state it.
+    env["OD_BLUR_FACES"] = "1"
     return plan
 
 
