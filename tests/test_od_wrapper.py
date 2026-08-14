@@ -194,3 +194,26 @@ def test_report_reaches_our_own_task_root(env) -> None:
     assert "inspect_pilot.py" in result.stdout
     assert "/out/datacomp/datacomp_1b/raw_shards" in result.stdout
     assert "pilot_report.json" in result.stdout
+
+
+def test_slow_reaches_our_own_task_root(env) -> None:
+    """Every other subcommand has a dispatch test; this one did not, and
+    was shipped without one."""
+    result = run(env, "--dry-run", "slow", "--node-hours", "15.7")
+    assert result.returncode == 0, result.stderr
+    assert "diagnose_throughput.py" in result.stdout
+    assert "/out/datacomp/datacomp_1b/raw_shards" in result.stdout
+    assert "--node-hours 15.7" in result.stdout
+
+
+@pytest.mark.parametrize("name", [
+    "inspect", "resolution", "verify", "plan", "report", "slow", "submit",
+])
+def test_every_advertised_subcommand_is_dispatchable(env, name) -> None:
+    """The usage text and the dispatcher must not drift apart. `slow` was
+    added to both, but nothing would have noticed if it had reached only
+    one of them."""
+    write_plan(env)
+    result = run(env, "--dry-run", name, "--from", "0", "--to", "0")
+    combined = result.stdout + result.stderr
+    assert "unknown subcommand" not in combined, combined
