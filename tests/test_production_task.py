@@ -1,0 +1,199 @@
+"""Run the real production task end to end, against a real download.
+
+The four bugs that cost queue slots in experiment 0003 all lived in the seam
+between correct components, and none was visible to a unit test. This drives
+the actual runner: the real manifest builder, real img2dataset, real health
+check, real DONE marker — against JPEGs served locally so the downloads
+genuinely succeed.
+
+The cases that matter are the ones production will actually hit: a requeued
+subjob finding its task already done, and a retry finding the wreckage of a
+failed attempt.
+
+Marked `integration`.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+from PIL import Image
+
+pytestmark = pytest.mark.integration
+
+REPO = Path(__file__).resolve().parent.parent
+RUNNER = REPO / "scripts" / "production_task.sh"
+IMAGES = 40
+TASK_ROWS = 16
+
+
+def free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def server(tmp_path_factory):
+    root = tmp_path_factory.mktemp("images")
+    for index in range(IMAGES):
+        buffer = io.BytesIO()
+        Image.new("RGB", (32, 32), (index * 6 % 256, 100, 150)).save(
+            buffer, format="JPEG")
+        (root / f"{index:04d}.jpg").write_bytes(buffer.getvalue())
+
+    port = free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+        cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        proc.terminate()
+        raise RuntimeError("server did not start")
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+@pytest.fixture
+def workspace(server, tmp_path):
+    """A plan over one source file, cut into tasks of TASK_ROWS URLs."""
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    source = meta / "a.parquet"
+    pq.write_table(pa.table({
+        "url": [f"{server}/{i:04d}.jpg" for i in range(IMAGES)],
+        "uid": [f"{i:09d}" for i in range(IMAGES)],
+    }), source)
+
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "urls_per_task": TASK_ROWS,
+        "total_rows": IMAGES,
+        "tasks": [
+            {"task_id": t, "rows": TASK_ROWS,
+             "pieces": [{"path": str(source),
+                         "start": t * TASK_ROWS,
+                         "end": (t + 1) * TASK_ROWS}]}
+            for t in range(IMAGES // TASK_ROWS)
+        ],
+    }))
+    return plan, tmp_path / "tasks"
+
+
+def run_task(plan: Path, task_root: Path, task_id: int = 0, **extra):
+    env = {
+        **os.environ,
+        "OD_PLAN": str(plan),
+        "OD_TASK_ID": str(task_id),
+        "OD_TASK_ROOT": str(task_root),
+        "OD_PROCESSES": "2",
+        "OD_THREADS": "2",
+        "OD_SAMPLES_PER_SHARD": "4",
+        "OD_ATTEMPT_TAG": extra.pop("attempt", "test"),
+        **extra,
+    }
+    return subprocess.run(["bash", str(RUNNER)], capture_output=True,
+                          text=True, env=env)
+
+
+def test_a_task_downloads_and_is_marked_done(workspace) -> None:
+    plan, task_root = workspace
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    task_dir = task_root / "task-000000"
+    done = json.loads((task_dir / "DONE.json").read_text())
+    assert done["task_id"] == 0
+    assert done["candidates"] == TASK_ROWS
+    assert done["successes"] == TASK_ROWS, "served locally; all should succeed"
+    assert done["settings"]["samples_per_shard"] == 4
+
+
+def test_the_shards_and_the_manifest_are_where_the_corpus_expects(
+    workspace,
+) -> None:
+    plan, task_root = workspace
+    run_task(plan, task_root)
+    task_dir = task_root / "task-000000"
+    assert (task_dir / "urls.parquet").is_file()
+    assert sorted(p.name for p in (task_dir / "shards").glob("*.tar")) == [
+        "00000.tar", "00001.tar", "00002.tar", "00003.tar"]
+
+
+def test_a_requeued_subjob_does_not_download_again(workspace) -> None:
+    """Waves get resubmitted and PBS requeues subjobs. Re-downloading would
+    waste a node-hour and replace good data with whatever the web returns
+    today."""
+    plan, task_root = workspace
+    assert run_task(plan, task_root).returncode == 0
+    first = (task_root / "task-000000" / "DONE.json").read_text()
+
+    again = run_task(plan, task_root)
+    assert again.returncode == 0
+    assert "already complete" in again.stdout
+    assert (task_root / "task-000000" / "DONE.json").read_text() == first
+
+
+def test_a_failed_attempt_is_set_aside_rather_than_added_to(workspace) -> None:
+    """The trap experiment 0003 hit twice.
+
+    img2dataset skips any shard that already has output, and a failed attempt
+    leaves statistics behind even when it stored nothing. Left in place, the
+    retry skips everything and reproduces the empty task.
+    """
+    plan, task_root = workspace
+    wreckage = task_root / "task-000000" / "shards"
+    wreckage.mkdir(parents=True)
+    (wreckage / "00000_stats.json").write_text(json.dumps({
+        "count": 4, "successes": 0,
+        "status_dict": {"<urlopen error [Errno 101] Network is unreachable>": 4},
+    }))
+
+    result = run_task(plan, task_root, attempt="retry")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "moving it to" in result.stdout
+
+    assert list(task_root.glob("task-000000.attempt-*")), "wreckage was lost"
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["successes"] == TASK_ROWS, "the retry inherited the empty shard"
+
+
+def test_an_unhealthy_task_is_not_marked_done(workspace) -> None:
+    """A subjob that stores nothing must fail, not report success.
+
+    Every URL points at a port with nothing behind it, which is the shape of
+    the 2026-07-28 outage.
+    """
+    plan, task_root = workspace
+    dead = json.loads(plan.read_text())
+    dead_port = free_port()
+    source = Path(dead["tasks"][0]["pieces"][0]["path"])
+    pq.write_table(pa.table({
+        "url": [f"http://127.0.0.1:{dead_port}/{i}.jpg" for i in range(IMAGES)],
+        "uid": [f"{i:09d}" for i in range(IMAGES)],
+    }), source)
+
+    result = run_task(plan, task_root)
+    assert result.returncode != 0
+    task_dir = task_root / "task-000000"
+    assert not (task_dir / "DONE.json").exists()
+    assert (task_dir / "health.json").is_file(), "the verdict must be kept"
