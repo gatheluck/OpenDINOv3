@@ -113,3 +113,45 @@ def test_a_directory_without_parquet_is_refused(tmp_path) -> None:
 def test_a_missing_directory_is_refused(tmp_path) -> None:
     result = run(tmp_path / "nope")
     assert result.returncode != 0
+
+
+# --------------------------------------------------------------------------
+# The documented schema is a hypothesis; the file is the fact
+# --------------------------------------------------------------------------
+
+def test_a_corpus_matching_its_documentation_says_so(tmp_path) -> None:
+    write(tmp_path / "a.parquet", url=["https://x/1.jpg"], text=["c"],
+          uid=["u"], original_width=[640], original_height=[480],
+          face_bboxes=[[]])
+    result = run(tmp_path, "--corpus", "datacomp_1b")
+    assert result.returncode == 0, result.stderr
+    assert "matches the documented schema" in result.stdout
+
+
+def test_a_disagreement_with_the_documentation_is_loud(tmp_path) -> None:
+    """Published schemas go stale and are sometimes simply wrong.
+
+    Finding that out before fetching tens of terabytes is the point of
+    looking at the files at all.
+    """
+    write(tmp_path / "a.parquet", url=["https://x/1.jpg"], caption=["c"],
+          uid=["u"])
+    result = run(tmp_path, "--corpus", "datacomp_1b")
+    assert "DISAGREES" in result.stdout
+    assert "text" in result.stdout, "must name what was expected"
+    assert "caption" in result.stdout, "and what was found"
+
+
+def test_an_unknown_corpus_name_is_refused(tmp_path) -> None:
+    write(tmp_path / "a.parquet", url=["https://x/1.jpg"])
+    result = run(tmp_path, "--corpus", "not-a-corpus")
+    assert result.returncode != 0
+    assert "datacomp_1b" in result.stderr, "should list what is known"
+
+
+def test_the_roles_it_resolved_are_always_shown(tmp_path) -> None:
+    """Even without a corpus name, the run records what it bound."""
+    write(tmp_path / "a.parquet", URL=["https://x/1.jpg"], TEXT=["c"])
+    out = run(tmp_path).stdout
+    assert "url        -> URL" in out
+    assert "caption    -> TEXT" in out

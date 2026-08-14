@@ -31,6 +31,9 @@ COYO = ["id", "url", "text", "width", "height", "image_phash", "text_length",
         "watermark_score", "aesthetic_score_laion_v2"]
 RELAION = ["URL", "TEXT", "WIDTH", "HEIGHT", "similarity", "hash",
            "punsafe", "pwatermark", "LANGUAGE"]
+YFCC = ["photoid", "uid", "unickname", "datetaken", "title", "description",
+        "usertags", "longitude", "latitude", "pageurl", "downloadurl",
+        "licensename", "ext"]
 
 
 def test_datacomp_resolves_to_its_own_names() -> None:
@@ -115,3 +118,82 @@ def test_an_exact_match_wins_over_a_case_insensitive_one() -> None:
     """If a schema somehow carries both, prefer the documented spelling."""
     r = ds.resolve(["url", "URL", "text"])
     assert r.url == "url"
+
+
+# --------------------------------------------------------------------------
+# YFCC100M — different in every role, and carrying a trap
+# --------------------------------------------------------------------------
+
+def test_yfcc_uses_downloadurl_and_title() -> None:
+    r = ds.resolve(YFCC)
+    assert r.url == "downloadurl"
+    assert r.caption == "title"
+    assert r.identifier == "photoid"
+
+
+def test_the_page_url_is_never_chosen_as_the_image(  ) -> None:
+    """YFCC carries both. `pageurl` is an HTML page.
+
+    Choosing it would download a hundred million web pages instead of
+    images, at full cost, and every one would decode as a failure rather
+    than as an obvious error.
+    """
+    r = ds.resolve(YFCC)
+    assert r.url != "pageurl"
+
+    # Even when it is the only URL-ish column, it must not be accepted.
+    with pytest.raises(ds.SchemaError):
+        ds.resolve(["photoid", "pageurl", "title"])
+
+
+def test_the_uploader_id_is_never_mistaken_for_the_sample_id() -> None:
+    """YFCC carries `uid`, and it is the uploader, not the photo.
+
+    Preferring it would give an identifier shared by every photo one person
+    posted: unique-looking, and not unique. Deduplication and provenance
+    would both be wrong, and nothing would say so.
+    """
+    r = ds.resolve(YFCC)
+    assert r.identifier == "photoid"
+    assert "uid" in YFCC, "the fixture must still contain the trap"
+
+
+def test_yfcc_records_no_size_or_faces() -> None:
+    r = ds.resolve(YFCC)
+    assert r.width is None and r.height is None
+    assert r.face_boxes is None
+
+
+# --------------------------------------------------------------------------
+# Documented schemas are a hypothesis, not a fact
+# --------------------------------------------------------------------------
+
+def test_a_schema_matching_the_documentation_reports_no_surprise() -> None:
+    assert ds.compare_to_documented("datacomp_1b", ds.resolve(DATACOMP)) == []
+
+
+def test_a_schema_disagreeing_with_the_documentation_is_reported() -> None:
+    """Published documentation goes stale and is sometimes simply wrong.
+
+    The observed schema is the fact; the documented one is what we expected.
+    A disagreement is worth knowing before 23 TB is fetched on the strength
+    of it.
+    """
+    changed = ds.resolve(["url", "caption", "uid", "face_bboxes"])
+    problems = ds.compare_to_documented("datacomp_1b", changed)
+    assert problems
+    assert any("caption" in p for p in problems)
+    assert any("text" in p for p in problems), "must name what was expected"
+
+
+def test_an_unknown_corpus_is_not_silently_approved() -> None:
+    with pytest.raises(KeyError):
+        ds.compare_to_documented("not-a-corpus", ds.resolve(DATACOMP))
+
+
+def test_every_documented_corpus_resolves_to_what_is_documented() -> None:
+    """The aliases and the recorded expectations must not drift apart."""
+    for name, columns in (("datacomp_1b", DATACOMP), ("coyo700m", COYO),
+                          ("relaion5b_research_safe", RELAION),
+                          ("yfcc100m", YFCC)):
+        assert ds.compare_to_documented(name, ds.resolve(columns)) == [], name

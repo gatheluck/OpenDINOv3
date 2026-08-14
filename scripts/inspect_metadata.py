@@ -29,18 +29,12 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-#: In upstream order of preference. DataComp uses `text`; others differ.
-CAPTION_NAMES = ("text", "caption", "txt", "alt_text", "title")
-URL_NAMES = ("url", "image_url", "URL")
-WIDTH_NAMES = ("width", "original_width", "w")
-HEIGHT_NAMES = ("height", "original_height", "h")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from opendinov3.core import dataset_schema as ds  # noqa: E402
 
-def first_present(names: tuple[str, ...], columns: list[str]) -> str | None:
-    for name in names:
-        if name in columns:
-            return name
-    return None
+# Column names live in one place only. Two lists of aliases would drift, and
+# this script exists to catch exactly that kind of divergence.
 
 
 def main() -> int:
@@ -48,6 +42,8 @@ def main() -> int:
     parser.add_argument("meta_dir", type=Path)
     parser.add_argument("--sample", type=int, default=3,
                         help="rows to print, so the schema can be believed")
+    parser.add_argument("--corpus", help="compare against this corpus's "
+                                         "documented schema")
     args = parser.parse_args()
 
     if not args.meta_dir.is_dir():
@@ -77,15 +73,20 @@ def main() -> int:
     print(f"columns        : {columns}")
     print()
 
-    url = first_present(URL_NAMES, columns)
-    caption = first_present(CAPTION_NAMES, columns)
-    width = first_present(WIDTH_NAMES, columns)
-    height = first_present(HEIGHT_NAMES, columns)
+    try:
+        resolved = ds.resolve(columns)
+    except ds.SchemaError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        return 1
+
+    url, caption = resolved.url, resolved.caption
+    width, height = resolved.width, resolved.height
 
     print(f"url column     : {url or 'NONE'}")
     print(f"caption column : {caption or 'NONE'}")
     print(f"width column   : {width or 'NONE'}")
     print(f"height column  : {height or 'NONE'}")
+    print(f"face boxes     : {resolved.face_boxes or 'NONE — blurring impossible'}")
     print()
 
     if caption is None:
@@ -94,8 +95,7 @@ def main() -> int:
         print("  done from this metadata. Captions would have to come from")
         print("  somewhere else.")
     else:
-        print(f"→ Captions are available in `{caption}`. The download must")
-        print("  pass --caption_col to keep them; it currently does not.")
+        print(f"→ Captions are available in `{caption}` and are carried.")
     print()
 
     if width is None or height is None:
@@ -106,6 +106,30 @@ def main() -> int:
         print("  below DINOv3's 256px global crop is measurable before"
               " downloading.")
     print()
+
+    # What the pipeline would bind, and whether it matches what the corpus
+    # documents. Published schemas go stale and are sometimes wrong; the file
+    # in hand is the fact.
+    print("roles resolved from this schema:")
+    print(resolved.describe())
+    print()
+
+    if args.corpus:
+        try:
+            problems = ds.compare_to_documented(args.corpus, resolved)
+        except KeyError as exc:
+            print(f"unknown corpus: {exc}", file=sys.stderr)
+            return 2
+        if problems:
+            print(f"⚠️  DISAGREES with the documented schema for "
+                  f"{args.corpus}:")
+            for problem in problems:
+                print(f"     {problem}")
+            print("   The file is the fact. Update DOCUMENTED in")
+            print("   src/opendinov3/core/dataset_schema.py, with the source.")
+        else:
+            print(f"→ matches the documented schema for {args.corpus}.")
+        print()
 
     if mismatched:
         print(f"⚠️  {len(mismatched)} file(s) differ in schema from "

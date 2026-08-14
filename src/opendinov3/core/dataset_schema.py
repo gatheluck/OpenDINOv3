@@ -46,13 +46,64 @@ from typing import Sequence
 #: Candidate spellings per role, in order of preference. Exact matches are
 #: tried before case-insensitive ones so a documented spelling always wins.
 ROLE_ALIASES: dict[str, tuple[str, ...]] = {
-    "url": ("url", "URL", "image_url", "IMAGE_URL"),
-    "caption": ("text", "TEXT", "caption", "CAPTION", "txt", "alt_text"),
-    "identifier": ("uid", "id", "hash", "key", "sample_id"),
+    # `pageurl` is deliberately absent. YFCC100M carries both `downloadurl`
+    # and `pageurl`; the latter is an HTML page. Choosing it would fetch a
+    # hundred million web pages at full cost, and each would fail to decode
+    # rather than announce itself as the wrong column.
+    "url": ("url", "URL", "downloadurl", "image_url", "IMAGE_URL"),
+    "caption": ("text", "TEXT", "caption", "CAPTION", "title", "txt",
+                "alt_text"),
+    # `photoid` before `uid`: YFCC100M carries both, and its `uid` is the
+    # uploader's user id, not the sample's. Preferring `uid` there would give
+    # an identifier shared by every photo one person posted — unique-looking
+    # and not unique.
+    "identifier": ("photoid", "uid", "id", "hash", "key", "sample_id"),
     "width": ("original_width", "width", "WIDTH"),
     "height": ("original_height", "height", "HEIGHT"),
     # Boxes only. `num_faces` is a count and cannot drive blurring.
     "face_boxes": ("face_bboxes", "face_boxes", "bboxes"),
+}
+
+#: What each corpus is documented to use, so that an observation which
+#: disagrees can be reported instead of silently accepted.
+#:
+#: Published schemas go stale and are sometimes wrong. These are a
+#: hypothesis; the schema read from the files is the fact. `inspect_metadata`
+#: compares the two and says when they differ, which is worth knowing before
+#: fetching tens of terabytes on the strength of a web page.
+DOCUMENTED: dict[str, dict[str, str | None]] = {
+    # download_upstream.py: url_col="url", caption_col="text",
+    # save_additional_columns=["uid"], bbox_col="face_bboxes"
+    "datacomp_1b": {
+        "url": "url", "caption": "text", "identifier": "uid",
+        "width": "original_width", "height": "original_height",
+        "face_boxes": "face_bboxes",
+    },
+    # Same family; the filtered subset is drawn from this pool.
+    # NOT independently verified — treated as DataComp-shaped until observed.
+    "datacomp_commonpool_xlarge": {
+        "url": "url", "caption": "text", "identifier": "uid",
+        "width": "original_width", "height": "original_height",
+        "face_boxes": "face_bboxes",
+    },
+    # Dataset card: id, url, text, width, height, num_faces, score columns.
+    # num_faces is a count, so there are no boxes and no blurring.
+    "coyo700m": {
+        "url": "url", "caption": "text", "identifier": "id",
+        "width": "width", "height": "height", "face_boxes": None,
+    },
+    # LAION parquet: URL, TEXT, WIDTH, HEIGHT, similarity, hash, punsafe,
+    # pwatermark, LANGUAGE. The card warns naming varies across their repos.
+    "relaion5b_research_safe": {
+        "url": "URL", "caption": "TEXT", "identifier": "hash",
+        "width": "WIDTH", "height": "HEIGHT", "face_boxes": None,
+    },
+    # photoid, downloadurl, pageurl, title, description, usertags, ...
+    # No recorded size. `title` is the caption; `description` is longer prose.
+    "yfcc100m": {
+        "url": "downloadurl", "caption": "title", "identifier": "photoid",
+        "width": None, "height": None, "face_boxes": None,
+    },
 }
 
 
@@ -128,3 +179,30 @@ def resolve(columns: Sequence[str]) -> ResolvedSchema:
         height=_find(ROLE_ALIASES["height"], columns),
         face_boxes=_find(ROLE_ALIASES["face_boxes"], columns),
     )
+
+
+def compare_to_documented(corpus: str, resolved: ResolvedSchema) -> list[str]:
+    """Where the observed schema differs from what the corpus documents.
+
+    Returns the disagreements rather than raising: a difference is a finding
+    to act on, not necessarily an error. Published schemas go stale, and a
+    corpus may have been re-released.
+
+    An unknown corpus raises, because silently approving a schema nobody has
+    a documented expectation for is how an unverified assumption becomes a
+    23 TB download.
+    """
+    if corpus not in DOCUMENTED:
+        raise KeyError(
+            f"no documented schema for {corpus!r}; known: "
+            f"{sorted(DOCUMENTED)}"
+        )
+    expected = DOCUMENTED[corpus]
+    problems: list[str] = []
+    for role, want in expected.items():
+        got = getattr(resolved, role)
+        if got != want:
+            problems.append(
+                f"{role}: documented {want!r}, observed {got!r}"
+            )
+    return problems
