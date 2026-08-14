@@ -159,3 +159,89 @@ def test_a_shorter_match_does_not_beat_a_longer_one(tmp_path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     urls = pq.read_table(out).column("url").to_pylist()
     assert not any("DECOY" in u for u in urls), "paired with the wrong shard"
+
+
+# ---------------------------------------------------------------------------
+# Removing the guesswork: record paths relative to the metadata root
+# ---------------------------------------------------------------------------
+
+PLANNER = REPO / "scripts" / "plan_partition.py"
+
+
+def test_the_plan_records_paths_relative_to_the_metadata_root(tmp_path
+                                                              ) -> None:
+    """Suffix matching resolves the real corpus at basename depth, because
+    the plan's `/corpus/datacomp/datacomp_1b/upstream_metadata/` prefix
+    shares no component with the host root's tail. That is only safe while
+    all 2,664 basenames are unique — an assumption nobody has checked, and
+    if it is wrong a task silently downloads another shard's URLs.
+
+    Recording the path relative to the root the plan already carries removes
+    the guess entirely.
+    """
+    meta = tmp_path / "upstream_metadata"
+    make_source(meta / "part-00000.parquet", 4)
+    out = tmp_path / "plan.json"
+    result = subprocess.run(
+        [sys.executable, str(PLANNER), str(meta), "--urls-per-task", "4",
+         "--json", str(out)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(out.read_text())
+    piece = plan["tasks"][0]["pieces"][0]["path"]
+    assert not Path(piece).is_absolute(), f"still absolute: {piece}"
+    assert piece == "part-00000.parquet"
+    assert plan["meta_dir"] == str(meta)
+
+
+def test_a_relative_piece_is_joined_with_the_metadata_root(tmp_path) -> None:
+    """No suffix search, no ambiguity: exactly one place it can be."""
+    real = tmp_path / "elsewhere"
+    make_source(real / "part-00000.parquet", 8)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "meta_dir": "/corpus/datacomp/datacomp_1b/upstream_metadata",
+        "urls_per_task": 8, "total_rows": 8,
+        "tasks": [{"task_id": 0, "rows": 8, "pieces": [
+            {"path": "part-00000.parquet", "start": 0, "end": 8}]}],
+    }))
+    out = tmp_path / "urls.parquet"
+    result = build(plan, out, OD_META_ROOT=str(real))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert pq.ParquetFile(out).metadata.num_rows == 8
+
+
+def test_a_relative_piece_keeps_its_subdirectory(tmp_path) -> None:
+    """The whole point: `b/part-00000.parquet` must not become
+    `a/part-00000.parquet`."""
+    real = tmp_path / "meta"
+    make_source(real / "a" / "part-00000.parquet", 8)
+    pq.write_table(pa.table({
+        "url": [f"https://DECOY/{i}.jpg" for i in range(8)],
+        "text": [f"caption {i}" for i in range(8)],
+        "uid": [f"{i:09d}" for i in range(8)],
+    }), real / "a" / "part-00000.parquet")
+    make_source(real / "b" / "part-00000.parquet", 8)
+
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "meta_dir": "/corpus/meta", "urls_per_task": 8, "total_rows": 8,
+        "tasks": [{"task_id": 0, "rows": 8, "pieces": [
+            {"path": "b/part-00000.parquet", "start": 0, "end": 8}]}],
+    }))
+    out = tmp_path / "urls.parquet"
+    assert build(plan, out, OD_META_ROOT=str(real)).returncode == 0
+    urls = pq.read_table(out).column("url").to_pylist()
+    assert not any("DECOY" in u for u in urls)
+
+
+def test_a_relative_piece_without_a_root_says_which_variable_is_missing(
+        tmp_path) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "meta_dir": "/corpus/meta", "urls_per_task": 8, "total_rows": 8,
+        "tasks": [{"task_id": 0, "rows": 8, "pieces": [
+            {"path": "part-00000.parquet", "start": 0, "end": 8}]}],
+    }))
+    result = build(plan, tmp_path / "urls.parquet")
+    assert result.returncode != 0
+    assert "OD_META_ROOT" in result.stdout + result.stderr

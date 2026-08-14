@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -111,7 +112,13 @@ def main() -> int:
             "total_rows": summary.total_rows,
             "tasks": [
                 {"task_id": t.task_id, "rows": t.rows,
-                 "pieces": [{"path": p, "start": s, "end": e}
+                 # Relative to meta_dir, recorded above. An absolute path
+                 # here would be a description of the machine that planned,
+                 # not of the data: od.sh plans inside the container where
+                 # the corpus is at /corpus, and the production job binds it
+                 # at its host path instead.
+                 "pieces": [{"path": os.path.relpath(p, args.meta_dir),
+                             "start": s, "end": e}
                             for p, s, e in t.pieces]}
                 for t in tasks
             ],

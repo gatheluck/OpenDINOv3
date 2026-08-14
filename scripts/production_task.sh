@@ -126,8 +126,19 @@ esac
 # decoded size under these names anyway; the manifest's claim is redundant.
 RESERVED="key status error_message width height original_width original_height"
 
+# img2dataset appends bbox_col to save_additional_columns itself, with no
+# deduplication (main.py: `save_additional_columns.append(bbox_col)`).
+# Passing it as well puts two fields of that name in the schema and every
+# shard dies with:
+#     KeyError: 'Field "face_bboxes" exists 2 times in schema'
+# When blurring is off there is no bbox_col, so it must be carried here or
+# blurring later becomes impossible without re-downloading.
+SKIP=""
+[ "${OD_BLUR_FACES}" = "1" ] && SKIP="face_bboxes"
+
 keep=""
 for column in ${OD_CARRY_COLUMNS:-uid face_bboxes}; do
+  [ "${column}" = "${SKIP}" ] && continue
   case " ${RESERVED} " in
     *" ${column} "*)
       echo "❌ cannot carry the column '${column}': img2dataset writes a" >&2

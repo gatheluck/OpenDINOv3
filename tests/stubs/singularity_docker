@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# A `singularity` stand-in backed by real Docker, for end-to-end rehearsal.
+#
+# WHY THIS EXISTS
+#
+# tests/stubs/singularity translates bind paths and runs the command on the
+# host. It does not isolate the filesystem, and it does not isolate the
+# environment. Both gaps let real bugs through to ABCI:
+#
+#   - a plan holding /corpus/... paths that the production job never binds
+#   - variables the job exports but never passes with --env
+#
+# This one maps every --bind to a docker -v and every --env to a docker -e,
+# and nothing else crosses. Docker does not inherit the host environment, so
+# it is STRICTER than SingularityCE: anything that passes here passes there,
+# whatever Singularity's inheritance rules turn out to be.
+set -uo pipefail
+
+[ "${1:-}" = "exec" ] || { echo "stub: only 'exec' is supported" >&2; exit 2; }
+shift
+
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bind) ARGS+=(-v "$2"); shift 2 ;;
+    --env)  ARGS+=(-e "$2"); shift 2 ;;
+    --*)    shift ;;                      # ignore other flags
+    *)      break ;;
+  esac
+done
+
+[ $# -ge 2 ] || { echo "stub: need an image and a command" >&2; exit 2; }
+shift                                     # the .sif path; we use a real image
+
+exec docker run --rm --user "$(id -u):$(id -g)" \
+  --add-host host.docker.internal:host-gateway \
+  "${ARGS[@]}" "${OD_TEST_IMAGE:-opendinov3:test}" "$@"

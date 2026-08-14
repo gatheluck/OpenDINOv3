@@ -49,6 +49,31 @@ done
 [ -n "${FROM}" ] && [ -n "${TO}" ] || die "give --from and --to (task ids, inclusive)"
 [ "${FROM}" -le "${TO}" ] 2>/dev/null || die "--from must not exceed --to"
 
+# Face blurring has no default, for the same reason production_task.sh has
+# none: it is irreversible across 902 million images and it is a legal
+# question. It is checked HERE as well because the generated job script is
+# the only channel to the compute node — PBS does not forward the submitting
+# shell's environment. Left out, the wave queues, waits, starts, and every
+# subjob exits 2 on production_task.sh's first check.
+if [ "${OD_BLUR_FACES:-unset}" = "unset" ]; then
+  {
+    echo "❌ OD_BLUR_FACES is not set, so the wave would fail on every node."
+    echo
+    echo "   DataComp's own downloader blurs faces by default. Blurring"
+    echo "   cannot be undone without re-downloading, so state it:"
+    echo
+    echo "     OD_BLUR_FACES=1   blur, as DataComp does"
+    echo "     OD_BLUR_FACES=0   keep the image as fetched"
+    echo
+    echo "   face_bboxes is stored with the sample either way."
+  } >&2
+  exit 2
+fi
+case "${OD_BLUR_FACES}" in
+  0|1) ;;
+  *) echo "❌ OD_BLUR_FACES must be 0 or 1, got '${OD_BLUR_FACES}'" >&2; exit 2 ;;
+esac
+
 WALLTIME="${OD_PROD_WALLTIME:-02:00:00}"
 PROCESSES="${OD_PROCESSES:-32}"
 THREADS="${OD_THREADS:-32}"
@@ -111,6 +136,7 @@ JOB="${OD_LOGDIR}/production_job.generated.sh"
   echo "export OD_PROCESSES=$(printf '%q' "${PROCESSES}")"
   echo "export OD_THREADS=$(printf '%q' "${THREADS}")"
   echo "export OD_SAMPLES_PER_SHARD=$(printf '%q' "${SAMPLES_PER_SHARD}")"
+  echo "export OD_BLUR_FACES=$(printf '%q' "${OD_BLUR_FACES}")"
   echo
   cat "${REPO}/scripts/production_job.sh"
 } > "${JOB}"
@@ -127,6 +153,7 @@ production wave
   already done: ${DONE_ALREADY} task(s) carry DONE.json and will be skipped
   per node   : ${PROCESSES} processes x ${THREADS} threads
   shard      : ${SAMPLES_PER_SHARD} samples
+  blur faces : ${OD_BLUR_FACES}
   walltime   : ${WALLTIME} per subjob (a task measured 1.01 h)
   image      : ${OD_SIF}
   job file   : ${JOB}

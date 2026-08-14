@@ -83,6 +83,9 @@ def workspace(server, tmp_path):
         "url": [f"{server}/{i:04d}.jpg" for i in range(IMAGES)],
         "text": [f"caption {i}" for i in range(IMAGES)],
         "uid": [f"{i:09d}" for i in range(IMAGES)],
+        # Without this the fixture cannot exercise OD_BLUR_FACES=1 at all,
+        # and the blur path is the one production actually runs.
+        "face_bboxes": [[[0.1, 0.1, 0.5, 0.5]] for _ in range(IMAGES)],
     }), source)
 
     plan = tmp_path / "plan.json"
@@ -192,6 +195,9 @@ def test_an_unhealthy_task_is_not_marked_done(workspace) -> None:
     pq.write_table(pa.table({
         "url": [f"http://127.0.0.1:{dead_port}/{i}.jpg" for i in range(IMAGES)],
         "uid": [f"{i:09d}" for i in range(IMAGES)],
+        # Without this the fixture cannot exercise OD_BLUR_FACES=1 at all,
+        # and the blur path is the one production actually runs.
+        "face_bboxes": [[[0.1, 0.1, 0.5, 0.5]] for _ in range(IMAGES)],
     }), source)
 
     result = run_task(plan, task_root)
@@ -309,3 +315,33 @@ def test_skipping_reencode_is_refused_while_blurring(workspace) -> None:
     # without this the test passes with the guard removed.
     assert "no face_bboxes column" not in combined, (
         "fell through to a later guard instead of stopping")
+
+
+def test_blurring_does_not_duplicate_the_bbox_column(workspace) -> None:
+    """img2dataset appends bbox_col to save_additional_columns itself, with
+    no deduplication (main.py: `save_additional_columns.append(bbox_col)`).
+    Carrying it as well makes every shard die with
+
+        KeyError: 'Field "face_bboxes" exists 2 times in schema'
+
+    after the download, so the task produces nothing at all. Found by
+    scripts/rehearse_pilot.sh; missed here because the fixture had no
+    face_bboxes column and so could never run the blur path.
+    """
+    import pyarrow.parquet as pq
+    plan, task_root = workspace
+    result = run_task(plan, task_root, blur="1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    shard = sorted((task_root / "task-000000" / "shards").glob("*.parquet"))[0]
+    names = pq.ParquetFile(shard).schema_arrow.names
+    assert names.count("face_bboxes") == 1, names
+
+
+def test_not_blurring_still_carries_the_boxes(workspace) -> None:
+    """With blurring off there is no bbox_col, so the column has to be
+    carried explicitly or blurring later needs a re-download."""
+    import pyarrow.parquet as pq
+    plan, task_root = workspace
+    assert run_task(plan, task_root, blur="0").returncode == 0
+    shard = sorted((task_root / "task-000000" / "shards").glob("*.parquet"))[0]
+    assert "face_bboxes" in pq.ParquetFile(shard).schema_arrow.names

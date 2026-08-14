@@ -33,6 +33,35 @@ def run(script: Path, *args: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True)
 
 
+SUBMIT = SCRIPTS / "submit_production.sh"
+
+
+def make_env(tmp_path) -> dict:
+    """Everything submit_production.sh needs, so a test exercises the guard
+    under test rather than a missing prerequisite."""
+    import os
+    out = tmp_path / "out"
+    (out / "logs").mkdir(parents=True)
+    (out / "opendinov3.sif").write_bytes(b"")
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "meta_dir": str(meta), "urls_per_task": 1, "total_rows": 8,
+        "tasks": [{"task_id": i, "rows": 1, "pieces": []} for i in range(8)],
+    }))
+    return {**os.environ,
+            "OD_SIF": str(out / "opendinov3.sif"), "OD_PLAN": str(plan),
+            "OD_META_ROOT": str(meta), "OD_LOGDIR": str(out / "logs"),
+            "OD_OUT_ROOT": str(out), "OD_TASK_ROOT": str(out / "tasks"),
+            "OD_BLUR_FACES": "1"}
+
+
+def submit(env: dict, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", str(SUBMIT), *map(str, args)],
+                          capture_output=True, text=True, env=env)
+
+
 @pytest.fixture
 def corpus(tmp_path):
     """Two source files and a plan whose task 1 spans both."""
@@ -154,3 +183,44 @@ def test_the_thresholds_can_be_tightened_but_are_reported(tmp_path) -> None:
     strict = run(ASSESS, tmp_path, "--min-yield", "0.5")
     assert strict.returncode != 0
     assert "50" in strict.stdout + strict.stderr
+
+
+def test_a_wave_cannot_be_submitted_without_stating_face_blurring(tmp_path
+                                                                  ) -> None:
+    """The blocker that would have wasted the whole pilot.
+
+    production_task.sh refuses to run unless OD_BLUR_FACES is set — rightly,
+    since blurring is irreversible across 902 million images. But the
+    generated job script exported eight variables and this was not among
+    them, and PBS does not forward the submitting shell's environment. So
+    the wave would queue, wait, start, and every subjob would exit 2 on the
+    first line.
+
+    Stated at submit time, where a human is watching, and baked into the job.
+    """
+    env = make_env(tmp_path)
+    env.pop("OD_BLUR_FACES", None)
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    # Not merely the variable name: `set -u` produces "unbound variable"
+    # further down, which names it too and would satisfy a loose check while
+    # the guard was gone.
+    assert "would fail on every node" in combined
+    assert "unbound variable" not in combined
+
+
+def test_the_stated_choice_is_baked_into_the_generated_job(tmp_path) -> None:
+    env = make_env(tmp_path)
+    env["OD_BLUR_FACES"] = "1"
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    job = Path(env["OD_LOGDIR"]) / "production_job.generated.sh"
+    assert "export OD_BLUR_FACES=1" in job.read_text()
+
+
+def test_an_invalid_blur_choice_is_refused_before_the_queue(tmp_path) -> None:
+    env = make_env(tmp_path)
+    env["OD_BLUR_FACES"] = "yes"
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+    assert result.returncode != 0

@@ -45,10 +45,28 @@ def resolve_source(recorded: str) -> str:
     with `a/part-00000.parquet` and the task would download another shard's
     URLs while every count still looked right.
     """
+    root = os.environ.get("OD_META_ROOT")
+
+    # Current plans record the path relative to the metadata root, so there
+    # is exactly one place it can be and nothing to search for.
+    if not os.path.isabs(recorded):
+        if not root:
+            raise FileNotFoundError(
+                f"the plan records a relative source ({recorded}) and "
+                "OD_META_ROOT is not set.\n"
+                "   It is the directory the metadata lives under."
+            )
+        joined = os.path.join(root, recorded)
+        if os.path.exists(joined):
+            return joined
+        raise FileNotFoundError(
+            f"source is missing: {joined}\n"
+            f"   (plan says {recorded!r}, OD_META_ROOT={root})"
+        )
+
+    # Older plans hold absolute paths from whatever mount planned them.
     if os.path.exists(recorded):
         return recorded
-
-    root = os.environ.get("OD_META_ROOT")
     if not root:
         raise FileNotFoundError(
             f"source is missing: {recorded}\n"
