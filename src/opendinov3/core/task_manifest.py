@@ -21,42 +21,33 @@ from typing import Sequence
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .urllist import URL_COLUMN_NAMES
+from . import dataset_schema
 
-#: What DataComp's own downloader carries, and why each is needed.
+#: The names the manifest writes, whatever upstream called them.
 #:
-#:   url          the image, obviously
-#:   text         the caption. DataComp passes caption_col="text". DINOv3 is
-#:                self-supervised and needs none, but the text-to-image stage
-#:                that video models train first cannot be done without it, so
-#:                dropping it would decide that question by accident.
-#:   uid          DataComp's identifier, kept via save_additional_columns. It
-#:                is how a sample is traced back to upstream.
-#:   face_bboxes  DataComp blurs faces by default using this. Blurring is
-#:                irreversible and is a decision for later — but only if the
-#:                boxes were kept.
+#: Upstream spellings differ — DataComp uses url/text/uid/face_bboxes, COYO
+#: uses id instead of uid, Re-LAION is uppercase throughout — so the roles are
+#: resolved per corpus by dataset_schema and the columns renamed here. Every
+#: downstream step then sees one schema, and img2dataset can be given the same
+#: --url_col / --caption_col regardless of source.
 #:
-#: Anything else upstream ships (CLIP scores, NSFW scores, dedup scores) is
-#: left behind: it would inflate every manifest and is recoverable from
-#: upstream by uid.
+#: Scores, NSFW probabilities and dedup signals are left behind: they inflate
+#: every manifest and are recoverable upstream by identifier.
 URL_COLUMN = "url"
-CARRIED_COLUMNS = ("url", "text", "uid", "face_bboxes")
+CANONICAL = {
+    "url": "url",
+    "caption": "text",
+    "identifier": "uid",
+    "width": "width",
+    "height": "height",
+    "face_boxes": "face_bboxes",
+}
 
 Piece = tuple[str, int, int]   # (path, start row, end row exclusive)
 
 
 class ManifestError(ValueError):
     """The manifest cannot be built exactly as the plan describes it."""
-
-
-def _url_column(names: Sequence[str], path: str) -> str:
-    for candidate in URL_COLUMN_NAMES:
-        if candidate in names:
-            return candidate
-    raise ManifestError(
-        f"{path} has no URL column; columns are {list(names)}, "
-        f"expected one of {list(URL_COLUMN_NAMES)}"
-    )
 
 
 def build_manifest(pieces: Sequence[Piece]) -> pa.Table:
@@ -83,16 +74,24 @@ def build_manifest(pieces: Sequence[Piece]) -> pa.Table:
             )
 
         names = list(handle.schema_arrow.names)
-        url = _url_column(names, path)
+        try:
+            schema = dataset_schema.resolve(names)
+        except dataset_schema.SchemaError as exc:
+            raise ManifestError(f"{path}: {exc}") from exc
 
-        # Optional columns are carried when upstream has them and skipped
-        # when it does not: derivative metadata sets differ, and a missing
-        # caption is a fact about the source rather than an error here.
-        wanted = [url] + [c for c in CARRIED_COLUMNS
-                          if c != URL_COLUMN and c in names]
+        # Optional roles are carried when upstream has them and skipped when
+        # it does not: a corpus without captions or face boxes is a fact
+        # about that corpus, not an error here.
+        wanted = schema.columns_to_carry()
+        renamed = [CANONICAL[role] for role, name in (
+            ("url", schema.url), ("caption", schema.caption),
+            ("identifier", schema.identifier), ("width", schema.width),
+            ("height", schema.height), ("face_boxes", schema.face_boxes),
+        ) if name]
+
         table = pq.read_table(path, columns=wanted).slice(start, end - start)
-        if url != URL_COLUMN:
-            table = table.rename_columns([URL_COLUMN] + wanted[1:])
+        if wanted != renamed:
+            table = table.rename_columns(renamed)
         chunks.append(table)
 
     return chunks[0] if len(chunks) == 1 else pa.concat_tables(chunks)

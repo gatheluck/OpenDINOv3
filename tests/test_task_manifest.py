@@ -130,3 +130,35 @@ def test_building_twice_gives_identical_rows(sources) -> None:
     pieces = [(str(sources / "a.parquet"), 90, 100),
               (str(sources / "b.parquet"), 0, 10)]
     assert tm.build_manifest(pieces).equals(tm.build_manifest(pieces))
+
+
+def test_an_uppercase_corpus_is_normalised(tmp_path) -> None:
+    """Re-LAION is uppercase throughout. Matching DataComp's spellings
+    exactly would carry no caption at all from it."""
+    path = tmp_path / "relaion.parquet"
+    pq.write_table(pa.table({
+        "URL": ["https://x/1.jpg"], "TEXT": ["a caption"],
+        "hash": ["abc"], "WIDTH": [640], "HEIGHT": [480],
+        "punsafe": [0.01],
+    }), path)
+    table = tm.build_manifest([(str(path), 0, 1)])
+    assert table.column_names == ["url", "text", "uid", "width", "height"]
+    assert table.column("text")[0].as_py() == "a caption"
+    assert table.column("uid")[0].as_py() == "abc"
+    assert "punsafe" not in table.column_names
+
+
+def test_a_coyo_shaped_corpus_keeps_its_identifier(tmp_path) -> None:
+    """COYO uses `id`; the predecessor's own config recorded that and the
+    pipeline ignored it."""
+    path = tmp_path / "coyo.parquet"
+    pq.write_table(pa.table({
+        "id": [123], "url": ["https://x/1.jpg"], "text": ["c"],
+        "width": [640], "height": [480], "num_faces": [2],
+    }), path)
+    table = tm.build_manifest([(str(path), 0, 1)])
+    assert table.column_names == ["url", "text", "uid", "width", "height"]
+    assert table.column("uid")[0].as_py() == 123
+    # num_faces is a count, not boxes: it cannot drive blurring and is not
+    # carried as if it could.
+    assert "face_bboxes" not in table.column_names
