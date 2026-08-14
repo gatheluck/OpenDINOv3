@@ -345,3 +345,52 @@ def test_not_blurring_still_carries_the_boxes(workspace) -> None:
     assert run_task(plan, task_root, blur="0").returncode == 0
     shard = sorted((task_root / "task-000000" / "shards").glob("*.parquet"))[0]
     assert "face_bboxes" in pq.ParquetFile(shard).schema_arrow.names
+
+
+def test_the_fetch_settings_are_variable_and_recorded(workspace) -> None:
+    """The first wave measured 34.9 URLs/sec/node against a model of 277
+    while using 0.40% of the bandwidth and 0.53 of 192 cores, so per-request
+    latency is the cost and these are the knobs that move it. An experiment
+    comparing arms is worthless if each arm's settings are not recorded
+    beside its result."""
+    plan, task_root = workspace
+    result = run_task(plan, task_root, OD_TIMEOUT="3", OD_RETRIES="0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["settings"]["timeout"] == 3
+    assert done["settings"]["retries"] == 0
+    # And that img2dataset was actually given them. DONE.json records the
+    # intent; img2dataset.cmd records the run. Hard-coding a value back into
+    # the call would leave DONE.json still reporting the variable, so an arm
+    # would be credited to a setting it never used.
+    argv = (task_root / "task-000000" / "img2dataset.cmd").read_text().split("\n")
+    assert argv[argv.index("--timeout") + 1] == "3", argv
+    assert argv[argv.index("--retries") + 1] == "0", argv
+
+
+def test_the_manifest_can_be_capped_for_an_experiment(workspace) -> None:
+    """An arm has to finish inside its walltime, or it measures how long a
+    kill takes rather than how fast the setting is."""
+    plan, task_root = workspace
+    result = run_task(plan, task_root, OD_MAX_URLS="4")
+    assert result.returncode == 0, result.stdout + result.stderr
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["candidates"] == 4, done
+
+
+def test_without_a_cap_the_whole_task_is_fetched(workspace) -> None:
+    """The cap must not have been bought by shrinking every task."""
+    plan, task_root = workspace
+    assert run_task(plan, task_root).returncode == 0
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["candidates"] == TASK_ROWS
+
+
+def test_the_default_settings_are_what_the_first_wave_ran(workspace) -> None:
+    """Changing the default silently would make the experiment compare
+    against something that was never measured."""
+    plan, task_root = workspace
+    assert run_task(plan, task_root).returncode == 0
+    settings = json.loads(
+        (task_root / "task-000000" / "DONE.json").read_text())["settings"]
+    assert settings["timeout"] == 10 and settings["retries"] == 2
