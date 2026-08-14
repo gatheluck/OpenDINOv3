@@ -63,6 +63,22 @@ def test_inspect_reaches_the_metadata_directory(env) -> None:
     assert "upstream_metadata" in result.stderr
 
 
+def test_resolution_reaches_the_metadata_directory(env) -> None:
+    """Measuring the corpus's resolution needs the same binds and the same
+    path, so it goes through the same wrapper rather than a pasted line."""
+    result = run(env, "resolution")
+    assert "no parquet files" in result.stderr
+    assert "upstream_metadata" in result.stderr
+
+
+def test_resolution_writes_its_answer_where_the_run_is_recorded(env) -> None:
+    """A figure quoted in a decision has to be traceable to a file."""
+    result = run(env, "--dry-run", "resolution")
+    assert result.returncode == 0, result.stderr
+    assert "measure_resolution.py" in result.stdout
+    assert "resolution.json" in result.stdout
+
+
 def test_the_environment_must_be_sourced_first(tmp_path) -> None:
     """Without OD_ROOT the wrapper says so instead of failing obscurely."""
     result = subprocess.run(
