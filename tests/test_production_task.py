@@ -386,11 +386,14 @@ def test_without_a_cap_the_whole_task_is_fetched(workspace) -> None:
     assert done["candidates"] == TASK_ROWS
 
 
-def test_the_default_settings_are_what_the_first_wave_ran(workspace) -> None:
-    """Changing the default silently would make the experiment compare
-    against something that was never measured."""
+def test_the_default_settings_are_the_ones_experiment_0004_chose(workspace
+                                                                  ) -> None:
+    """retries=0 was measured, not reasoned: 3.31x the throughput of
+    retries=2 for 0.2 points of yield, and less than half the unreachable
+    rate. Reverting the default silently would undo a wave's worth of
+    evidence, so it is pinned."""
     plan, task_root = workspace
     assert run_task(plan, task_root).returncode == 0
     settings = json.loads(
         (task_root / "task-000000" / "DONE.json").read_text())["settings"]
-    assert settings["timeout"] == 10 and settings["retries"] == 2
+    assert settings["timeout"] == 10 and settings["retries"] == 0
