@@ -217,3 +217,33 @@ def test_every_advertised_subcommand_is_dispatchable(env, name) -> None:
     result = run(env, "--dry-run", name, "--from", "0", "--to", "0")
     combined = result.stdout + result.stderr
     assert "unknown subcommand" not in combined, combined
+
+
+def test_experiment_submits_four_arms_not_a_production_wave(env) -> None:
+    """The arms are numbered 1..4 and map to tasks 8..11 through the offset
+    experiment_0004_job.sh sets. Submitting -J 9-12 instead would run four
+    ordinary tasks with the default settings and measure nothing."""
+    write_plan(env, tasks=1388)
+    result = run(env, "--dry-run", "experiment")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "-J 1-4" in result.stdout, result.stdout
+    assert "experiment_0004_job.sh" in result.stdout
+
+
+def test_experiment_still_range_checks_against_the_plan(env) -> None:
+    """The arms need tasks 8..11 to exist. A plan too short would otherwise
+    only fail on the node, after the queue wait."""
+    write_plan(env, tasks=4)
+    # --dry-run: submit_production.sh checks for a submitter before it
+    # range-checks the plan, and this fixture configures none.
+    result = run(env, "--dry-run", "experiment")
+    assert result.returncode != 0
+    assert "outside it" in result.stdout + result.stderr
+
+
+def test_a_production_wave_still_uses_the_production_body(env) -> None:
+    """The override must not leak into ordinary submissions."""
+    write_plan(env, tasks=1388)
+    result = run(env, "--dry-run", "submit", "--from", "0", "--to", "7")
+    assert "experiment_0004_job.sh" not in result.stdout
+    assert "-J 1-8" in result.stdout

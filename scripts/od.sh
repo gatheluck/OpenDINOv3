@@ -34,6 +34,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   submit --from N --to M   send one production wave to the queue
   report             does the pilot justify widening the wave
   slow --node-hours H  why a wave is slow, and what would fix it
+  experiment         run experiment 0004 (4 fetch-setting arms)
   plan               partition the metadata into tasks, writing plan.json
   assess <task dir>  whether a finished task is worth keeping
   exec <script> ...  any script in scripts/, with the standard binds
@@ -74,6 +75,22 @@ run() {   # $@: the command inside the container
 in_corpus() { printf '/corpus%s\n' "${1#${OD_ROOT}}"; }
 in_out()    { printf '/out%s\n'    "${1#${OD_OUT_ROOT}}"; }
 
+# NOT through the container: qsub does not exist inside the image. OD_PLAN
+# and OD_META_ROOT are derived here because passing them inline makes a
+# 152-character command, which does not survive a paste.
+do_submit() {
+  OD_PLAN="${OD_PLAN:-${PRODUCTION}/plan.json}"
+  [ -f "${OD_PLAN}" ] || die "no plan at ${OD_PLAN}. Run: bash scripts/od.sh plan"
+  export OD_PLAN
+  export OD_META_ROOT="${OD_META_ROOT:-${METADATA}}"
+  # Same derivation env.local.sh uses, so the two cannot drift.
+  export OD_LOGDIR="${OD_LOGDIR:-${OD_OUT_ROOT}/logs/pbs_stdout}"
+  # od.sh consumes --dry-run before dispatch; forward it explicitly or a
+  # rehearsal would submit for real.
+  [ "${DRY_RUN}" -eq 1 ] && set -- "$@" --dry-run
+  exec bash "${REPO}/scripts/submit_production.sh" "$@"
+}
+
 SUBCOMMAND="$1"; shift
 case "${SUBCOMMAND}" in
   inspect)
@@ -101,20 +118,21 @@ case "${SUBCOMMAND}" in
       "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
       --json "$(in_out "${PRODUCTION}")/pilot_report.json" "$@"
     ;;
+  experiment)
+    # Four arms on tasks 8..11. Arms are numbered from 1 and map to tasks
+    # through the offset experiment_0004_job.sh sets, so the array range is
+    # overridden while --from/--to still range-check the plan.
+    #
+    # Calls do_submit rather than falling through to `submit)`: `;;&`
+    # re-tests the remaining patterns against the ORIGINAL word, which is
+    # still "experiment", so the fallthrough silently reached the default
+    # branch and reported an unknown subcommand.
+    export OD_JOB_SCRIPT="${REPO}/scripts/experiment_0004_job.sh"
+    export OD_ARRAY_RANGE="1-4"
+    do_submit --from 8 --to 11 "$@"
+    ;;
   submit)
-    # NOT through the container: qsub does not exist inside the image.
-    # OD_PLAN and OD_META_ROOT are derived here because passing them inline
-    # makes a 152-character command, which does not survive a paste.
-    OD_PLAN="${OD_PLAN:-${PRODUCTION}/plan.json}"
-    [ -f "${OD_PLAN}" ] || die "no plan at ${OD_PLAN}. Run: bash scripts/od.sh plan"
-    export OD_PLAN
-    export OD_META_ROOT="${OD_META_ROOT:-${METADATA}}"
-    # Same derivation env.local.sh uses, so the two cannot drift.
-    export OD_LOGDIR="${OD_LOGDIR:-${OD_OUT_ROOT}/logs/pbs_stdout}"
-    # od.sh consumes --dry-run before dispatch; forward it explicitly or a
-    # rehearsal would submit for real.
-    [ "${DRY_RUN}" -eq 1 ] && set -- "$@" --dry-run
-    exec bash "${REPO}/scripts/submit_production.sh" "$@"
+    do_submit "$@"
     ;;
   plan)
     run python /work/scripts/plan_partition.py "$(in_corpus "${METADATA}")" \

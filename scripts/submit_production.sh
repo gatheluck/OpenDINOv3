@@ -134,6 +134,10 @@ J_FROM=$((FROM + TASK_ID_OFFSET))
 J_TO=$((TO + TASK_ID_OFFSET))
 
 COUNT=$((TO - FROM + 1))
+# An experiment numbers its arms from 1 and maps them to tasks with its own
+# offset, so it overrides the range while still range-checking against the
+# plan through --from/--to.
+ARRAY_RANGE="${OD_ARRAY_RANGE:-}"
 DONE_ALREADY=$(find "${TASK_ROOT}" -maxdepth 2 -name DONE.json 2>/dev/null | wc -l | tr -d ' ')
 
 JOB="${OD_LOGDIR}/production_job.generated.sh"
@@ -152,7 +156,10 @@ JOB="${OD_LOGDIR}/production_job.generated.sh"
   echo "export OD_BLUR_FACES=$(printf '%q' "${OD_BLUR_FACES}")"
   echo "export OD_TASK_ID_OFFSET=$(printf '%q' "${TASK_ID_OFFSET}")"
   echo
-  cat "${REPO}/scripts/production_job.sh"
+  # The body is production_job.sh unless an experiment substitutes its own.
+  # Substituting keeps one submitter, so the environment checks, the plan
+  # range check and the identifier hygiene cannot drift between the two.
+  cat "${OD_JOB_SCRIPT:-${REPO}/scripts/production_job.sh}"
 } > "${JOB}"
 chmod +x "${JOB}"
 
@@ -161,8 +168,9 @@ cat <<SUMMARY
 production wave
 
   tasks      : ${FROM}..${TO}  (${COUNT} subjobs, 1 node each)
-  array      : -J ${J_FROM}-${J_TO}  (PBS indices; offset ${TASK_ID_OFFSET},
-               because ABCI refuses index 0)
+  array      : -J ${ARRAY_RANGE:-${J_FROM}-${J_TO}}  (PBS indices; offset
+               ${TASK_ID_OFFSET}, because ABCI refuses index 0)
+  job body   : ${OD_JOB_SCRIPT:-scripts/production_job.sh}
   plan       : ${OD_PLAN}$([ -n "${PLAN_TASKS}" ] && echo " (${PLAN_TASKS} tasks total)")
   metadata   : ${OD_META_ROOT}
   output     : ${TASK_ROOT}
@@ -183,9 +191,9 @@ SUMMARY
 
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo "dry run — not submitting. Would run:"
-  echo "  ${SUBMIT:-<submitter>} --nodes 1 --walltime ${WALLTIME} ${JOB} -- -J ${J_FROM}-${J_TO}"
+  echo "  ${SUBMIT:-<submitter>} --nodes 1 --walltime ${WALLTIME} ${JOB} -- -J ${ARRAY_RANGE:-${J_FROM}-${J_TO}}"
   echo
   exit 0
 fi
 
-exec "${SUBMIT}" --nodes 1 --walltime "${WALLTIME}" "${JOB}" -- -J "${J_FROM}-${J_TO}"
+exec "${SUBMIT}" --nodes 1 --walltime "${WALLTIME}" "${JOB}" -- -J "${ARRAY_RANGE:-${J_FROM}-${J_TO}}"
