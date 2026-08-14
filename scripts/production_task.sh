@@ -113,8 +113,29 @@ case " ${COLUMNS} " in
   *) echo "⚠️  no caption column: this task's shards will hold no text." >&2 ;;
 esac
 
+# Names img2dataset appends to the input schema itself. Carrying an upstream
+# column with one of these names puts two fields of the same name in the
+# output schema; the writer's buffer is keyed by name, so the duplicate
+# collapses to one key that receives two appends per row while every other
+# key receives one. The rows misalign and pyarrow raises "Expected bytes, got
+# a 'int' object" — at write time, so after a shard has been downloaded in
+# full, on every shard, for the whole run.
+#
+# `width` is an obvious column to want to carry, which is exactly why this
+# refuses up front rather than 23 TB later. img2dataset records the real
+# decoded size under these names anyway; the manifest's claim is redundant.
+RESERVED="key status error_message width height original_width original_height"
+
 keep=""
-for column in uid face_bboxes; do
+for column in ${OD_CARRY_COLUMNS:-uid face_bboxes}; do
+  case " ${RESERVED} " in
+    *" ${column} "*)
+      echo "❌ cannot carry the column '${column}': img2dataset writes a" >&2
+      echo "   field of that name itself, and two fields with one name" >&2
+      echo "   misalign every row at write time." >&2
+      echo "   Reserved: ${RESERVED}" >&2
+      exit 2 ;;
+  esac
   case " ${COLUMNS} " in *" ${column} "*) keep="${keep:+${keep},}\"${column}\"" ;; esac
 done
 [ -n "${keep}" ] && EXTRA_ARGS=(--save_additional_columns "[${keep}]")
