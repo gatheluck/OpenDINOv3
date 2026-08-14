@@ -170,7 +170,11 @@ production wave
   tasks      : ${FROM}..${TO}  (${COUNT} subjobs, 1 node each)
   array      : -J ${ARRAY_RANGE:-${J_FROM}-${J_TO}}  (PBS indices; offset
                ${TASK_ID_OFFSET}, because ABCI refuses index 0)
-  job body   : ${OD_JOB_SCRIPT:-scripts/production_job.sh}
+  job body   : ${OD_JOB_SCRIPT:-scripts/production_job.sh}$(
+    [ -n "${OD_JOB_SCRIPT:-}" ] && [ -r "${OD_JOB_SCRIPT}" ] && {
+      printf '\n\n  arms (from the job body, one per PBS index):'
+      sed -n 's/^  \([0-9]\)) export \(.*\) ;;$/\n    \1  \2/p' "${OD_JOB_SCRIPT}"
+    })
   plan       : ${OD_PLAN}$([ -n "${PLAN_TASKS}" ] && echo " (${PLAN_TASKS} tasks total)")
   metadata   : ${OD_META_ROOT}
   output     : ${TASK_ROOT}

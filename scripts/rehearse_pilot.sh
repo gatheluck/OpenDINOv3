@@ -239,6 +239,49 @@ else
   sed 's/^/    /' "${WORK}/shards.log"
 fi
 
+# --- 5. an experiment arm, end to end ---------------------------------------
+# The production path was proven here after seven blockers were found one at
+# a time on the cluster. The experiment path is a different job body with
+# different variables; proving it costs a minute.
+step "5. experiment arm 2 (threads 128, retries 0 via arm 4)"
+export OD_JOB_SCRIPT="${REPO}/scripts/experiment_0004_job.sh"
+export OD_ARRAY_RANGE="1-4"
+export OD_EXP_MAX_URLS=8          # the whole fixture, so the arm completes
+export OD_TASK_ROOT="${WORK}/out/exp_shards"
+if ! bash "${REPO}/scripts/submit_production.sh" --from 0 --to 2 --dry-run \
+       > "${WORK}/exp_submit.log" 2>&1; then
+  fail "generating the experiment job failed"
+  sed 's/^/    /' "${WORK}/exp_submit.log" | tail -6
+else
+  grep -q "OD_THREADS=128" "${WORK}/exp_submit.log" \
+    && pass "the dry run names each arm's settings" \
+    || fail "the dry run does not say what the arms differ in"
+
+  EXP_JOB="${OD_LOGDIR}/production_job.generated.sh"
+  # Arm 4 -> task 4 - (-7)... the fixture only has tasks 0..2, so run arm 1
+  # against the offset the job body sets and check it reaches a real task.
+  PATH="${SHIM}:${PATH}" PBS_ARRAY_INDEX=1 bash "${EXP_JOB}" \
+    > "${WORK}/exp_job.log" 2>&1
+  EXP_RC=$?
+  if grep -q "arm       : 1" "${WORK}/exp_job.log"; then
+    pass "the arm banner reached the node"
+  else
+    fail "the experiment job body did not run"
+    sed 's/^/    /' "${WORK}/exp_job.log" | tail -12
+  fi
+  if grep -qE "fetch       : timeout 10s, retries 2" "${WORK}/exp_job.log"; then
+    pass "arm 1 settings reached the container"
+  else
+    fail "arm settings did NOT reach the container"
+    grep -E "fetch|threads|max urls" "${WORK}/exp_job.log" | sed 's/^/    /'
+  fi
+  if grep -q "max urls    : 8 (capped)" "${WORK}/exp_job.log"; then
+    pass "OD_MAX_URLS reached the container"
+  else
+    fail "OD_MAX_URLS did NOT reach the container"
+  fi
+fi
+
 # --- verdict ----------------------------------------------------------------
 printf '\n'
 if [ "${FAILURES}" -eq 0 ]; then
