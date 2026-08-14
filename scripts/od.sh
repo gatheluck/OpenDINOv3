@@ -33,6 +33,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   verify             does what arrived match what the metadata claimed
   submit --from N --to M   send one production wave to the queue
   report             does the pilot justify widening the wave
+  slow --node-hours H  why a wave is slow, and what would fix it
   plan               partition the metadata into tasks, writing plan.json
   assess <task dir>  whether a finished task is worth keeping
   exec <script> ...  any script in scripts/, with the standard binds
@@ -89,6 +90,11 @@ case "${SUBCOMMAND}" in
       --files "${OD_SAMPLE_FILES:-40}" \
       --baseline "$(in_out "${PRODUCTION}")/resolution.json" \
       --json "$(in_out "${PRODUCTION}")/verify_sizes.json" "$@"
+    ;;
+  slow)
+    run python /work/scripts/diagnose_throughput.py \
+      "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
+      --json "$(in_out "${PRODUCTION}")/throughput.json" "$@"
     ;;
   report)
     run python /work/scripts/inspect_pilot.py \
