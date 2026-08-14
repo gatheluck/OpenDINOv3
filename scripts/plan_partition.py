@@ -30,9 +30,20 @@ import pyarrow.parquet as pq  # noqa: E402
 
 from opendinov3.core import metadata_partition as mp  # noqa: E402
 
-#: Measured twice, on different tasks, at 32 processes: 186.7 and 179.0
-#: successes/sec for 1,000,000 URLs at ~65% yield.
+#: successes/sec/node at 32 processes.
+#:
+#: HISTORICAL: 186.7 and 179.0, measured on the predecessor's runs.
+#: CONTRADICTED 2026-08-14: the first production wave measured 22.5
+#: URLs/sec/node, i.e. ~14.6 successes/sec — 12x below this. Every subjob
+#: was busy (open tars minus finished shards was exactly processes x nodes),
+#: so the cause is time per URL, not concurrency.
+#:
+#: The historical figure is kept only so the gap stays visible. Every
+#: estimate printed below is therefore OPTIMISTIC BY ABOUT 12x until this is
+#: replaced with a figure measured on a current wave. Do not size a walltime
+#: from it. See scripts/diagnose_throughput.py.
 SUCC_PER_SEC = 180.0
+SUCC_PER_SEC_IS_MEASURED_ON_A_CURRENT_WAVE = False
 YIELD = 0.65
 #: Whole-corpus figure: 82,262,338 images in 2.11 TB.
 KB_PER_IMAGE = 25.1
@@ -91,6 +102,10 @@ def main() -> int:
     terabytes = images * KB_PER_IMAGE * 1024 / 1e12
 
     print(f"at {YIELD:.0%} yield and {SUCC_PER_SEC:.0f} successes/sec per node:")
+    if not SUCC_PER_SEC_IS_MEASURED_ON_A_CURRENT_WAVE:
+        print("  ⚠️  that rate is HISTORICAL and has been contradicted: the")
+        print("      2026-08-14 wave measured ~14.6/sec, 12x lower. Every")
+        print("      figure below is optimistic by about that factor.")
     print(f"  images     : {images/1e6:,.0f} million")
     print(f"  storage    : {terabytes:.1f} TB (at {KB_PER_IMAGE} KB/image)")
     print(f"  node-hours : {hours:,.0f}")

@@ -26,7 +26,10 @@
 # Optional:
 #   OD_SUBMIT             submitter taking --nodes/--walltime; defaults to
 #                         od_qsub.sh in OD_CAPTURE_ROOT
-#   OD_PROD_WALLTIME      default 02:00:00 (a task measured 1.01 h)
+#   OD_PROD_WALLTIME      default 12:00:00. NOT derived from the
+#                         throughput model: the pilot measured 22.5
+#                         URLs/s/node, 12x below it, so a walltime
+#                         sized from the model kills every subjob.
 #   OD_PROCESSES          default 32   (experiment 0002: 64 is 31% worse)
 #   OD_THREADS            default 32
 #   OD_SAMPLES_PER_SHARD  default 10000
@@ -74,7 +77,7 @@ case "${OD_BLUR_FACES}" in
   *) echo "❌ OD_BLUR_FACES must be 0 or 1, got '${OD_BLUR_FACES}'" >&2; exit 2 ;;
 esac
 
-WALLTIME="${OD_PROD_WALLTIME:-02:00:00}"
+WALLTIME="${OD_PROD_WALLTIME:-12:00:00}"
 PROCESSES="${OD_PROCESSES:-32}"
 THREADS="${OD_THREADS:-32}"
 SAMPLES_PER_SHARD="${OD_SAMPLES_PER_SHARD:-10000}"
@@ -167,7 +170,7 @@ production wave
   per node   : ${PROCESSES} processes x ${THREADS} threads
   shard      : ${SAMPLES_PER_SHARD} samples
   blur faces : ${OD_BLUR_FACES}
-  walltime   : ${WALLTIME} per subjob (a task measured 1.01 h)
+  walltime   : ${WALLTIME} per subjob
   image      : ${OD_SIF}
   job file   : ${JOB}
   submitter  : ${SUBMIT:-<none: dry run>}
