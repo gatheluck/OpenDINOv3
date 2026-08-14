@@ -35,6 +35,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   report             does the pilot justify widening the wave
   slow --node-hours H  why a wave is slow, and what would fix it
   experiment         run experiment 0004 (4 fetch-setting arms)
+  arms               compare the finished arms and choose a setting
   plan               partition the metadata into tasks, writing plan.json
   assess <task dir>  whether a finished task is worth keeping
   exec <script> ...  any script in scripts/, with the standard binds
@@ -117,6 +118,11 @@ case "${SUBCOMMAND}" in
     run python /work/scripts/inspect_pilot.py \
       "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
       --json "$(in_out "${PRODUCTION}")/pilot_report.json" "$@"
+    ;;
+  arms)
+    run python /work/scripts/compare_arms.py \
+      "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
+      --json "$(in_out "${PRODUCTION}")/arms.json" "$@"
     ;;
   experiment)
     # Four arms on tasks 8..11. Arms are numbered from 1 and map to tasks
