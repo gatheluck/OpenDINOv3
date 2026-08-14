@@ -148,6 +148,13 @@ write_node_script() {   # $1 phase  $2 node index  $3 slice file  $4 processes
 #!/usr/bin/env bash
 set -uo pipefail
 echo "  node${k} on \$(hostname): ${procs} processes"
+# \$PBS_LOCALDIR is node-local — ABCI's documentation is explicit that it is
+# "ノードローカルの領域". The job creates this directory on the node it runs
+# on; every other node has to create its own or singularity fails to bind it
+# and exits 255 before the worker starts. That cost one run of this
+# experiment: node1 wrote nothing and the analysis compared half the work
+# against the whole of it.
+mkdir -p "${SCRATCH}/cache" || exit 1
 singularity exec ${BINDS[*]} ${ENVS[*]} \\
   --env OD_SLICE_DIR=/out/${phase}/node${k}/slices \\
   --env OD_EXP_OUT=/out/${phase}/node${k} \\
@@ -165,6 +172,7 @@ EOF
 run_phase_single() {   # $1 phase  $2 slice file  $3 processes
   local phase="$1" script t0 t1
   echo "── ${phase}: 1 node × $3 processes"
+  mkdir -p "${OD_EXP_OUT}/${phase}"
   # Without this the phase ran `bash ""`, printed "wall 0 s", and looked like
   # it had happened.
   if ! script="$(write_node_script "${phase}" 0 "$2" "$3")" || [ -z "${script}" ]
@@ -172,6 +180,7 @@ run_phase_single() {   # $1 phase  $2 slice file  $3 processes
     echo "❌ ${phase}: could not stage the slice; phase not run" >&2
     return 1
   fi
+  printf '1\n' > "${OD_EXP_OUT}/${phase}/expected_nodes"
   t0=$(date +%s); bash "${script}"; t1=$(date +%s)
   printf '%s\n' "$((t1 - t0))" > "${OD_EXP_OUT}/${phase}/wall_seconds"
   echo "   wall $((t1 - t0)) s"
@@ -209,7 +218,9 @@ run_phase_multi() {   # $1 phase  $2 processes-per-node
     }
   fi
   echo "── ${phase}: ${OD_NODES} nodes × ${procs} processes (launcher: ${launcher})"
+  mkdir -p "${OD_EXP_OUT}/${phase}"
 
+  printf '%s\n' "${OD_NODES}" > "${OD_EXP_OUT}/${phase}/expected_nodes"
   t0=$(date +%s)
   for k in $(seq 0 $((OD_NODES - 1))); do
     if ! script="$(write_node_script "${phase}" "${k}" \
@@ -234,6 +245,72 @@ run_phase_multi() {   # $1 phase  $2 processes-per-node
   printf '%s\n' "$((t1 - t0))" > "${OD_EXP_OUT}/${phase}/wall_seconds"
   echo "   wall $((t1 - t0)) s"
 }
+
+# --- does the real container actually start on every node? -------------------
+#
+# The nodes are already allocated, so this costs nothing but seconds — and it
+# is the only way to find a node-level problem before spending the phases on
+# it. One run of this experiment was lost to a bind source that existed on
+# the first node and nowhere else; the phases ran for 35 minutes and half the
+# data was silently missing.
+#
+# Deliberately runs the same binds, the same image and the same launcher as
+# the real phases. A check that takes a different path checks nothing.
+write_probe_script() {   # $1 node index
+  local k="$1" dir="${OD_EXP_OUT}/nodecheck/node${k}"
+  mkdir -p "${dir}"
+  cat > "${dir}/probe.sh" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+mkdir -p "${SCRATCH}/cache" || {
+  echo "  node${k} \$(hostname): cannot create node-local scratch ${SCRATCH}"
+  exit 1; }
+singularity exec ${BINDS[*]} ${ENVS[*]} "${OD_SIF}" \\
+  test -d /work/scripts -a -d /out -a -d /scratch || {
+  echo "  node${k} \$(hostname): container started but a bind is missing"
+  exit 1; }
+singularity exec ${BINDS[*]} ${ENVS[*]} "${OD_SIF}" \\
+  python -c "import img2dataset" || {
+  echo "  node${k} \$(hostname): img2dataset not importable in the image"
+  exit 1; }
+echo "  node${k} \$(hostname): ok"
+EOF
+  chmod +x "${dir}/probe.sh"
+  printf '%s\n' "${dir}/probe.sh"
+}
+
+verify_nodes() {
+  local k script launcher rc=0
+  if [ "${OD_NODES}" -le 1 ]; then
+    launcher="local"
+  else
+    launcher="$(detect_launcher)" || {
+      echo "⚠️  no launcher; only node 0 can be checked" >&2
+      launcher="local"
+    }
+  fi
+  echo "── node check: real container, real binds, on every node"
+  for k in $(seq 0 $((OD_NODES - 1))); do
+    script="$(write_probe_script "${k}")"
+    if [ "${k}" -eq 0 ] || [ "${launcher}" = "local" ]; then
+      bash "${script}" || rc=1
+    elif [ "${launcher}" = "pbsdsh" ]; then
+      pbsdsh -n "${k}" -- bash "${script}" || rc=1
+    else
+      ssh -o BatchMode=yes -o StrictHostKeyChecking=no "${HOSTS[$k]}" \
+        bash "${script}" || rc=1
+    fi
+  done
+  return "${rc}"
+}
+
+verify_nodes || {
+  echo "❌ a node cannot run the container. Not starting the phases: the" >&2
+  echo "   result would be missing that node's share and would compare" >&2
+  echo "   part of the work against all of it." >&2
+  exit 1
+}
+echo
 
 echo "──────────────────────────────────────────────────────────"
 run_phase_single phase1_single "slices_p1/slice_1.parquet" "${OD_TOTAL_PROCESSES}"

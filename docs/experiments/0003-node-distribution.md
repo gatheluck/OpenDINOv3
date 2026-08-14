@@ -1,6 +1,6 @@
 # Experiment 0003: Does spreading work across nodes cost anything?
 
-Status: **two attempts failed, both on staging rather than on the question. Third not yet run.**
+Status: **three attempts, none measuring the question. Fourth not yet run.**
 Date: 2026-08-13
 
 ## Question
@@ -297,10 +297,72 @@ each cost a queue slot.
 Home is unaffected by dropping `--env HOME`: `df` on the home filesystem
 reported 11% used both before and after the run, unchanged.
 
+### Attempt 3, 2026-08-14: the phases ran, one node did not
+
+Job wall **31 minutes**, exit 0, 500 shards written. Staging worked, the
+archive of the previous attempt worked, stderr was empty.
+
+```
+phase1_single   1 node   685 s   200,000 cand   190.8 succ/s
+phase2_multi    1 node   537 s   100,000 cand   121.0 succ/s   ← 1 of 2 nodes
+phase3_single   1 node   681 s   200,000 cand   190.2 succ/s
+```
+
+`node1 exit 255`, and 500 shards rather than 600 — exactly node1's share
+missing.
+
+**The analysis then reported REJECTED, and it was wrong to.** It compared a
+phase that did 100,000 URLs against phases that did 200,000, got 0.63×, and
+called it a distribution penalty. There was no penalty; there was a missing
+node.
+
+**Cause.** The scratch directory is `${PBS_LOCALDIR}/od_exp0003`, and ABCI's
+documentation states plainly that `$PBS_LOCALDIR` is node-local. The job
+created it on the node it ran on. node1 had no such directory, so singularity
+could not bind it and exited before the worker started. `pbsdsh` itself was
+fine — the `hostname` probe ran on node1 in the same job.
+
+**Two fixes, and the second matters more.**
+
+1. Each node's script now creates its own node-local scratch.
+2. **A phase that lost a node is no longer judged.** The job records how many
+   nodes each phase expected; the analysis marks a short phase INCOMPLETE,
+   excludes it from the verdict, and reports the question as unanswered. A
+   missing node is now incapable of producing a verdict, whatever causes it.
+
+**And the job now checks every node before spending the phases.** The nodes
+are already allocated, so it costs seconds: the same image, the same binds
+and the same launcher as the real phases, run on each node. Had this existed,
+attempt 3 would have failed in one minute with a precise message instead of
+running for 31.
+
+### Why three attempts, under test-driven development
+
+Each fix was tested against the case just fixed rather than the class it
+belonged to, and the test harness modelled the cluster too generously.
+
+| Attempt | Cause | Why the tests missed it |
+|---|---|---|
+| 1 | absolute symlink in staging | the job script had never been executed |
+| 2 | `cp` onto attempt 1's leftovers | the end-to-end test ran once, into an empty directory |
+| 3 | node-local scratch missing on node1 | one node locally, and `$PBS_LOCALDIR` was placed inside the shared tree, so a node-local bind looked shared |
+
+The third is the instructive one: the invariant test written for it initially
+**passed with the bug present**, and only mutation testing exposed that. The
+fixture had made a node-local path look like shared storage.
+
+What replaces case-by-case tests is a set of invariants that hold at any node
+count, none of which need a second node to check:
+
+- every bind source is either on shared storage or created by the script that
+  binds it
+- staging is idempotent
+- no staged path is an absolute symlink, and the tree survives being moved
+- a phase that lost a node cannot produce a verdict
+
 ### Next
 
-Third attempt. The question the experiment exists for is still unanswered:
+Fourth attempt. The question the experiment exists for is still unanswered:
 no measurement of node distribution has been taken.
 
-No manual cleanup is needed — the job sets the previous attempts aside
-itself.
+No manual cleanup is needed — the job sets previous attempts aside itself.

@@ -26,7 +26,8 @@ DNS_KEY = "<urlopen error [Errno -2] Name or service not known>"
 
 def write_phase(root: Path, phase: str, nodes: int, wall: float,
                 successes_per_node: int, dns_share: float = 0.081,
-                yield_rate: float = 0.865) -> None:
+                yield_rate: float = 0.865,
+                expected_nodes: int | None = None) -> None:
     """One phase's output tree.
 
     Failures scale with the node's share of the work. Every phase downloads
@@ -37,6 +38,7 @@ def write_phase(root: Path, phase: str, nodes: int, wall: float,
     phase_dir = root / phase
     phase_dir.mkdir(parents=True, exist_ok=True)
     (phase_dir / "wall_seconds").write_text(f"{wall}\n")
+    (phase_dir / "expected_nodes").write_text(f"{expected_nodes or nodes}\n")
     for node in range(nodes):
         shards = phase_dir / f"node{node}" / "run1_p16" / "shards"
         shards.mkdir(parents=True)
@@ -129,4 +131,40 @@ def test_an_empty_directory_fails_rather_than_reporting_nothing(
 ) -> None:
     result = run(tmp_path)
     assert result.returncode == 2
-    assert "no single-node phase" in result.stderr
+    assert "no complete single-node phase" in result.stderr
+
+
+def test_a_phase_that_lost_a_node_is_excluded_from_the_verdict(tmp_path) -> None:
+    """The failure that produced a REJECTED from nothing.
+
+    node1 exited before writing anything, so the multi-node phase did half
+    the work in close to the full time. Its rate was 0.63× the single-node
+    rate, and that was reported as a distribution penalty. It was a missing
+    node.
+    """
+    write_phase(tmp_path, "phase1_single", 1, 685.0, 130719)
+    # Two nodes were expected; only one reported.
+    write_phase(tmp_path, "phase2_multi", 1, 537.0, 64956, expected_nodes=2)
+    write_phase(tmp_path, "phase3_single", 1, 681.0, 129560)
+
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "INCOMPLETE (1/2 nodes)" in result.stdout
+    assert "excluded from the verdict" in result.stdout
+    # No distribution claim may be made from it.
+    assert "distribution free: False" not in result.stdout
+    assert "NOT RUN" in result.stdout
+    assert "NOT REJECTED" in result.stdout, (
+        "a lost node is an incomplete run, not a falsified hypothesis"
+    )
+
+
+def test_a_complete_multi_node_phase_is_still_judged(tmp_path) -> None:
+    """The guard must not swallow a real result."""
+    write_phase(tmp_path, "phase1_single", 1, 100.0, 6400)
+    write_phase(tmp_path, "phase2_multi", 2, 100.0, 3200, expected_nodes=2)
+    write_phase(tmp_path, "phase3_single", 1, 100.0, 6400)
+
+    result = run(tmp_path)
+    assert "INCOMPLETE" not in result.stdout
+    assert "distribution free: True" in result.stdout
