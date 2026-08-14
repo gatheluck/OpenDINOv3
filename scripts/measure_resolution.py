@@ -5,13 +5,18 @@
 
 WHY
 
-DINOv3 takes 2 global crops at 256x256 and 8 local crops at 112x112. An image
-whose short side is under 256 cannot fill a global crop without upscaling.
-Video models train a text-to-image stage at 256p and then 512p. So the share
-of the corpus below those sizes decides how much of a 902-million-image,
-23 TB download is usable for the training it is being collected for — and
-DataComp records `original_width` and `original_height`, so it is answerable
-here, in seconds on a login node, rather than afterwards.
+This corpus is being built as a general asset on ABCI: usable for large image
+recognition models and for video generation models, and for consumers not yet
+named. So this does not grade the corpus against any one model's input size.
+It characterises it — the spread of image sizes and aspect ratios — so that
+whoever uses it can read off their own answer at their own threshold.
+
+The one thing worth knowing up front is how much of it is degenerate:
+tracking pixels, spacer GIFs and icons are waste for every consumer, unlike a
+200-pixel photograph, which is merely small for some of them.
+
+DataComp records `original_width` and `original_height`, so this is
+answerable in seconds on a login node rather than after 23 TB has arrived.
 
 Reads only the two size columns. Parquet is columnar, so the URLs and
 captions are never touched; a file that is hundreds of megabytes on disk
@@ -40,13 +45,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from opendinov3.core import dataset_schema as ds  # noqa: E402
 from opendinov3.core import resolution_stats as rs  # noqa: E402
 
-#: Thresholds worth reporting, and what each one gates.
+#: Reference points, so a reader can locate their own threshold. These are
+#: landmarks, not requirements: nothing here is a pass mark, and the corpus
+#: is not being filtered to any of them.
 THRESHOLDS: dict[int, str] = {
-    112: "DINOv3 local crop",
-    256: "DINOv3 global crop; video T2I stage 1",
-    512: "video T2I stage 2",
-    1024: "high-resolution finetuning",
+    32: "degenerate — tracking pixels, spacers, icons",
+    112: "small-crop scale",
+    224: "the common classification input",
+    256: "the common SSL global-crop scale",
+    512: "the common text-to-image scale",
+    1024: "high-resolution work",
 }
+
+#: Where the mass sits, which is the actual output of this script.
+PERCENTILES = (1, 5, 10, 25, 50, 75, 90, 99)
 
 
 def main() -> int:
@@ -119,9 +131,12 @@ def main() -> int:
         print(f"unusable size : {stats.unusable:,} "
               f"({stats.unusable / (stats.total + stats.unusable):.2%}) "
               "— zero or missing, excluded rather than counted as small")
-    print(f"median short side : {stats.median_short_side:,.0f} px")
     print()
-    print("share whose SHORT side is below:")
+    print("short side, by percentile:")
+    for p in PERCENTILES:
+        print(f"  p{p:<3} {stats.percentile(p):>8,.0f} px")
+    print()
+    print("share whose SHORT side is below (landmarks, not requirements):")
     for threshold, why in THRESHOLDS.items():
         fraction = stats.fraction_below(threshold)
         print(f"  {threshold:>5} px  {fraction:6.1%}   ({why})")
@@ -138,19 +153,26 @@ def main() -> int:
               f"first: {unreadable[0]}")
         print()
 
-    below_global = stats.fraction_below(256)
-    if below_global > 0.5:
-        print("→ More than half the corpus cannot fill a 256px global crop.")
-        print("  Downloading it whole would spend most of the budget on")
-        print("  images DINOv3 would have to upscale. Filtering on")
-        print(f"  {resolved.width}/{resolved.height} before download is free —")
-        print("  the columns are already in the manifest.")
-    elif below_global > 0.15:
-        print(f"→ {below_global:.1%} is below the 256px global crop. Worth a")
-        print("  minimum-size filter at manifest time, which costs nothing.")
+    # The download keeps every image at its original resolution
+    # (--resize_mode no), and img2dataset records each sample's real decoded
+    # width and height in the shard's parquet. So no consumer is committed to
+    # anyone else's threshold: filtering happens at training time, per use,
+    # without re-downloading. Nothing below is a reason to filter now.
+    degenerate = stats.fraction_below(32)
+    if degenerate > 0.01:
+        print(f"→ {degenerate:.1%} has a short side under 32 px: tracking")
+        print("  pixels, spacers and icons. That is waste for every")
+        print("  consumer, and the only filter that does not cost someone")
+        print("  else their use case. It is also the only one that saves")
+        print("  bandwidth, since img2dataset's --min_image_size decodes")
+        print("  the image before rejecting it.")
     else:
-        print(f"→ {below_global:.1%} is below the 256px global crop. The")
-        print("  corpus is suitable for DINOv3 as-is.")
+        print(f"→ Only {degenerate:.2%} is degenerate (short side < 32 px),")
+        print("  so there is nothing worth filtering out for everyone.")
+    print()
+    print("  Everything else stays: images are stored at original")
+    print("  resolution and each sample's real size is recorded per shard,")
+    print("  so any consumer can filter to their own threshold later.")
 
     if args.json:
         payload = {
@@ -163,6 +185,8 @@ def main() -> int:
             "rows_unusable": stats.unusable,
             "median_short_side": stats.median_short_side,
             "median_aspect": stats.median_aspect,
+            "percentile_short_side": {str(p): stats.percentile(p)
+                                      for p in PERCENTILES},
             "fraction_below": {str(t): stats.fraction_below(t)
                                for t in THRESHOLDS},
             "unreadable_files": unreadable,

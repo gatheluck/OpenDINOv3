@@ -44,12 +44,41 @@ def corpus(root: Path, per_file: list[tuple[int, int]], count: int) -> None:
         write(root / f"part-{index:05d}.parquet", [width] * 4, [height] * 4)
 
 
-def test_the_share_below_dinov3s_global_crop_is_reported(tmp_path) -> None:
+def test_the_share_below_a_landmark_size_is_reported(tmp_path) -> None:
     write(tmp_path / "a.parquet", [100, 300, 640], [100, 300, 480])
     result = run(tmp_path)
     assert result.returncode == 0, result.stderr
     assert "256" in result.stdout
     assert "33.3%" in result.stdout
+
+
+def test_the_spread_is_reported_not_just_one_models_threshold(tmp_path
+                                                              ) -> None:
+    """The corpus is for several consumers and for ones not yet named, so a
+    single pass/fail against one model's input size is the wrong output."""
+    write(tmp_path / "a.parquet", list(range(10, 1010, 10)),
+          list(range(10, 1010, 10)))
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+    for marker in ("p10", "p50", "p90"):
+        assert marker in result.stdout, marker
+
+
+def test_no_filtering_is_urged_for_a_merely_small_corpus(tmp_path) -> None:
+    """A 200px photograph is small for some uses and fine for others.
+    Dropping it at download time would decide for everyone, permanently."""
+    write(tmp_path / "a.parquet", [200] * 10, [200] * 10)
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "nothing worth filtering out for everyone" in result.stdout
+
+
+def test_degenerate_images_are_called_out_because_nobody_wants_them(tmp_path
+                                                                    ) -> None:
+    write(tmp_path / "a.parquet", [1] * 5 + [800] * 5, [1] * 5 + [600] * 5)
+    result = run(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "tracking" in result.stdout
 
 
 def test_size_columns_are_resolved_not_hard_coded(tmp_path) -> None:
@@ -114,6 +143,7 @@ def test_the_result_can_be_written_as_json(tmp_path) -> None:
     assert payload["rows_measured"] == 2
     assert payload["fraction_below"]["256"] == 0.5
     assert payload["files_read"] == 1 and payload["files_total"] == 1
+    assert payload["percentile_short_side"]["50"] is not None
 
 
 def test_an_empty_directory_is_an_error_not_an_empty_answer(tmp_path) -> None:

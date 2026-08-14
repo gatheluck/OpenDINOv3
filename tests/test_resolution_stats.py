@@ -90,3 +90,42 @@ def test_a_sample_is_reproducible() -> None:
 def test_sampling_nothing_is_refused() -> None:
     with pytest.raises(ValueError):
         rs.sample_indices(total=100, want=0)
+
+
+# --------------------------------------------------------------------------
+# Characterising the corpus, rather than grading it against one model
+# --------------------------------------------------------------------------
+
+def test_percentiles_describe_the_spread() -> None:
+    """A single "share below 256" answers one consumer's question. The
+    percentiles let a reader answer their own, whatever threshold they care
+    about."""
+    stats = rs.summarise([(n, n) for n in range(1, 101)])
+    assert stats.percentile(50) == pytest.approx(50, abs=1)
+    assert stats.percentile(10) == pytest.approx(10, abs=1)
+    assert stats.percentile(90) == pytest.approx(90, abs=1)
+
+
+def test_the_extremes_are_reachable() -> None:
+    stats = rs.summarise([(10, 10), (20, 20), (30, 30)])
+    assert stats.percentile(0) == 10
+    assert stats.percentile(100) == 30
+
+
+def test_percentiles_of_nothing_are_nothing() -> None:
+    assert rs.summarise([]).percentile(50) is None
+
+
+def test_degenerate_images_are_countable_separately() -> None:
+    """Tracking pixels and spacer GIFs are waste for every consumer, unlike
+    a 200px photo which is merely small for some of them. They are the one
+    thing worth dropping in a corpus meant to stay general."""
+    stats = rs.summarise([(1, 1), (16, 16), (200, 200), (800, 600)])
+    assert stats.below(32) == 2
+
+
+def test_a_percentile_between_two_samples_is_interpolated() -> None:
+    """With two images of 10 and 20 px, p50 is 15. Truncating to the lower
+    sample would under-report every percentile on a small sample, and read
+    as a real finding about the corpus."""
+    assert rs.summarise([(10, 10), (20, 20)]).percentile(50) == pytest.approx(15)

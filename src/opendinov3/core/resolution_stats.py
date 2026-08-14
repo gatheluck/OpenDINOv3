@@ -70,6 +70,22 @@ class ResolutionStats:
     def median_short_side(self) -> float | None:
         return median(self.short_sides) if self.short_sides else None
 
+    def percentile(self, p: float) -> float | None:
+        """The short side at the p-th percentile.
+
+        A single "share below 256" answers one consumer's question. This
+        corpus is being built for several, and for consumers not yet known,
+        so the spread is the useful output: a reader picks their own
+        threshold and reads off their own answer.
+        """
+        if not self.short_sides:
+            return None
+        ordered = sorted(self.short_sides)
+        position = (len(ordered) - 1) * p / 100
+        low = int(position)
+        high = min(low + 1, len(ordered) - 1)
+        return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
     @property
     def median_aspect(self) -> float | None:
         return median(self.aspects) if self.aspects else None
