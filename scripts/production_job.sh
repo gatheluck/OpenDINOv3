@@ -12,8 +12,15 @@
 # better on a full cluster and fail independently.
 #
 # Expects, set by the submit script:
-#   OD_SIF OD_REPO OD_PLAN OD_TASK_ROOT
+#   OD_SIF OD_REPO OD_PLAN OD_TASK_ROOT OD_META_ROOT OD_BLUR_FACES
 #   OD_PROCESSES OD_THREADS OD_SAMPLES_PER_SHARD
+#
+# EVERY variable the task needs must appear in the --env list below. That
+# list is explicit; it is not the host environment. Exporting a variable in
+# the job script is NOT enough — proven by scripts/rehearse_pilot.sh, which
+# caught OD_BLUR_FACES and OD_META_ROOT missing from it after both had been
+# correctly exported. Add a variable here whenever production_task.sh grows
+# a new one, and re-run the rehearsal.
 
 set -uo pipefail
 
@@ -28,7 +35,7 @@ echo "task      : ${TASK_ID}"
 echo "started   : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 for v in OD_SIF OD_REPO OD_PLAN OD_TASK_ROOT OD_PROCESSES OD_THREADS \
-         OD_SAMPLES_PER_SHARD; do
+         OD_SAMPLES_PER_SHARD OD_BLUR_FACES OD_META_ROOT; do
   eval "val=\${$v:-}"
   [ -n "${val}" ] || { echo "❌ ${v} is not set" >&2; exit 1; }
 done
@@ -71,6 +78,8 @@ singularity exec \
   --env "OD_THREADS=${OD_THREADS}" \
   --env "OD_SAMPLES_PER_SHARD=${OD_SAMPLES_PER_SHARD}" \
   --env "OD_ATTEMPT_TAG=${PBS_JOBID:-manual}" \
+  --env "OD_BLUR_FACES=${OD_BLUR_FACES}" \
+  --env "OD_META_ROOT=${OD_META_ROOT}" \
   "${OD_SIF}" bash /work/scripts/production_task.sh
 rc=$?
 
