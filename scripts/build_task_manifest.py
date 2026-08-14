@@ -27,6 +27,51 @@ import pyarrow.parquet as pq  # noqa: E402
 from opendinov3.core import task_manifest as tm  # noqa: E402
 
 
+def resolve_source(recorded: str) -> str:
+    """Find the file the plan means, under this container's mount layout.
+
+    A plan records the absolute path of every parquet it read. od.sh runs
+    the planner inside the container with the corpus bound at /corpus, so
+    plans come out holding /corpus/... paths. The production job binds the
+    metadata at its HOST path instead (`--bind "${OD_META_ROOT}:${OD_META_ROOT}"`)
+    and does not bind /corpus at all, so those paths do not exist there.
+
+    A plan is a description of the data, not of one machine's mount table.
+    When the recorded path is absent, the longest trailing run of components
+    that is unique under OD_META_ROOT is used.
+
+    Matching on the basename alone would be wrong: shards share basenames
+    across subdirectories, so `b/part-00000.parquet` would silently pair
+    with `a/part-00000.parquet` and the task would download another shard's
+    URLs while every count still looked right.
+    """
+    if os.path.exists(recorded):
+        return recorded
+
+    root = os.environ.get("OD_META_ROOT")
+    if not root:
+        raise FileNotFoundError(
+            f"source is missing: {recorded}\n"
+            "   The plan was written under a different mount layout. Set "
+            "OD_META_ROOT to the directory\n"
+            "   the metadata lives under so the path can be rebased."
+        )
+
+    parts = Path(recorded).parts
+    # Longest suffix first: the most specific match wins.
+    for depth in range(len(parts), 0, -1):
+        candidate = Path(root, *parts[-depth:])
+        if candidate.exists():
+            return str(candidate)
+
+    raise FileNotFoundError(
+        f"source is missing: {recorded}\n"
+        f"   Nothing matching it under OD_META_ROOT={root}\n"
+        "   Either the plan is for a different corpus, or OD_META_ROOT "
+        "points at the wrong tree."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
@@ -51,7 +96,14 @@ def main() -> int:
         return 2
 
     entry = entries[args.task_id]
-    pieces = [(p["path"], int(p["start"]), int(p["end"])) for p in entry["pieces"]]
+    try:
+        pieces = [(resolve_source(p["path"]), int(p["start"]), int(p["end"]))
+                  for p in entry["pieces"]]
+    except FileNotFoundError as exc:
+        print(f"task {args.task_id}: {exc}", file=sys.stderr)
+        return 1
+    for path, _, _ in pieces:
+        print(f"source: {path}")
 
     try:
         table = tm.build_manifest(pieces)

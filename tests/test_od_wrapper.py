@@ -43,6 +43,20 @@ def run(env, *args) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, env=env)
 
 
+def write_plan(env, tasks: int = 8) -> Path:
+    """A plan submit_production.sh will accept: its range check refuses a
+    --to outside the plan, which is correct and would otherwise mask what
+    these tests are about."""
+    import json
+    plan = Path(env["OD_OUT_ROOT"]) / "production" / "plan.json"
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(json.dumps({"urls_per_task": 1, "total_rows": tasks,
+                                "tasks": [{"task_id": i, "rows": 1,
+                                           "pieces": []}
+                                          for i in range(tasks)]}))
+    return plan
+
+
 def test_a_missing_subcommand_lists_what_is_available(env) -> None:
     result = run(env)
     assert result.returncode != 0
@@ -133,3 +147,36 @@ def test_verify_reaches_the_existing_shards(env) -> None:
     assert "verify_recorded_sizes.py" in result.stdout
     assert "/corpus/datacomp/datacomp_1b/raw_shards" in result.stdout
     assert "resolution.json" in result.stdout
+
+
+def test_submit_derives_the_plan_and_metadata_paths(env, tmp_path) -> None:
+    """The raw invocation needs OD_PLAN and OD_META_ROOT inline, which comes
+    to 152 characters — past the paste-safety limit and straight into the
+    failure mode this wrapper exists to prevent."""
+    write_plan(env)
+    result = run(env, "--dry-run", "submit", "--from", "0", "--to", "7")
+    assert "plan.json" in result.stdout, result.stdout + result.stderr
+    assert "upstream_metadata" in result.stdout
+
+
+def test_submit_does_not_go_through_the_container(env, tmp_path) -> None:
+    """qsub does not exist inside the image. Routing the submitter through
+    singularity would fail on the login node, after the operator believed
+    the wave had gone in."""
+    write_plan(env)
+    result = run(env, "--dry-run", "submit", "--from", "0", "--to", "7")
+    assert "singularity" not in result.stdout.split("submit_production")[0]
+
+
+def test_a_dry_run_submit_really_is_a_rehearsal(env) -> None:
+    """od.sh strips --dry-run before dispatch. Not forwarding it would make
+    a rehearsal put a wave in the queue."""
+    write_plan(env)
+    result = run(env, "--dry-run", "submit", "--from", "0", "--to", "7")
+    assert "not submitting" in result.stdout, result.stdout + result.stderr
+
+
+def test_submit_without_a_plan_says_how_to_make_one(env) -> None:
+    result = run(env, "submit", "--from", "0", "--to", "7")
+    assert result.returncode != 0
+    assert "od.sh plan" in result.stderr

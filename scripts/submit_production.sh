@@ -122,6 +122,7 @@ production wave
 
   tasks      : ${FROM}..${TO}  (${COUNT} subjobs, 1 node each)
   plan       : ${OD_PLAN}$([ -n "${PLAN_TASKS}" ] && echo " (${PLAN_TASKS} tasks total)")
+  metadata   : ${OD_META_ROOT}
   output     : ${TASK_ROOT}
   already done: ${DONE_ALREADY} task(s) carry DONE.json and will be skipped
   per node   : ${PROCESSES} processes x ${THREADS} threads
