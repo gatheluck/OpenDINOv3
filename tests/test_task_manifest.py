@@ -22,9 +22,13 @@ from opendinov3.core import task_manifest as tm
 
 
 def write_source(path, first: int, rows: int) -> None:
+    """Shaped like DataComp-1B: url, text, uid, face_bboxes."""
     pq.write_table(pa.table({
         "url": [f"https://h.example/{first + i}.jpg" for i in range(rows)],
+        "text": [f"caption {first + i}" for i in range(rows)],
         "uid": [f"{first + i:012d}" for i in range(rows)],
+        "face_bboxes": [[] for _ in range(rows)],
+        "clip_score": [0.3] * rows,
     }), path)
 
 
@@ -66,11 +70,35 @@ def test_the_url_column_is_found_by_name_not_position(sources, tmp_path) -> None
                                                "https://x/2.jpg"]
 
 
-def test_only_the_columns_the_downloader_needs_are_carried(sources) -> None:
-    """img2dataset reads --url_col. Carrying the rest inflates every
-    manifest for no benefit and ties us to the upstream schema."""
+def test_the_columns_datacomp_itself_carries_are_carried(sources) -> None:
+    """Not just the URL.
+
+    DataComp's own downloader passes caption_col="text",
+    save_additional_columns=["uid"] and bbox_col="face_bboxes". Carrying only
+    the URL would produce a corpus with no captions — usable for DINOv3,
+    which is self-supervised, and useless for the text-to-image stage that
+    video models train first. It would also discard the face boxes that make
+    blurring possible at all.
+    """
     table = tm.build_manifest([(str(sources / "a.parquet"), 0, 5)])
-    assert table.column_names == ["url"]
+    assert table.column_names == ["url", "text", "uid", "face_bboxes"]
+
+
+def test_columns_absent_upstream_are_simply_not_carried(tmp_path) -> None:
+    """Older or derivative metadata may lack some of them. Missing optional
+    columns are not an error; a missing URL is."""
+    path = tmp_path / "minimal.parquet"
+    pq.write_table(pa.table({"url": ["https://x/1.jpg"], "uid": ["a"]}), path)
+    table = tm.build_manifest([(str(path), 0, 1)])
+    assert table.column_names == ["url", "uid"]
+
+
+def test_the_caption_column_keeps_the_name_img2dataset_is_told(sources) -> None:
+    """production_task.sh passes --caption_col text; a rename here would
+    silently drop every caption."""
+    table = tm.build_manifest([(str(sources / "a.parquet"), 0, 2)])
+    assert "text" in table.column_names
+    assert table.column("text")[0].as_py() == "caption 0"
 
 
 def test_a_source_without_a_url_column_is_refused(tmp_path) -> None:
@@ -102,3 +130,35 @@ def test_building_twice_gives_identical_rows(sources) -> None:
     pieces = [(str(sources / "a.parquet"), 90, 100),
               (str(sources / "b.parquet"), 0, 10)]
     assert tm.build_manifest(pieces).equals(tm.build_manifest(pieces))
+
+
+def test_an_uppercase_corpus_is_normalised(tmp_path) -> None:
+    """Re-LAION is uppercase throughout. Matching DataComp's spellings
+    exactly would carry no caption at all from it."""
+    path = tmp_path / "relaion.parquet"
+    pq.write_table(pa.table({
+        "URL": ["https://x/1.jpg"], "TEXT": ["a caption"],
+        "hash": ["abc"], "WIDTH": [640], "HEIGHT": [480],
+        "punsafe": [0.01],
+    }), path)
+    table = tm.build_manifest([(str(path), 0, 1)])
+    assert table.column_names == ["url", "text", "uid", "width", "height"]
+    assert table.column("text")[0].as_py() == "a caption"
+    assert table.column("uid")[0].as_py() == "abc"
+    assert "punsafe" not in table.column_names
+
+
+def test_a_coyo_shaped_corpus_keeps_its_identifier(tmp_path) -> None:
+    """COYO uses `id`; the predecessor's own config recorded that and the
+    pipeline ignored it."""
+    path = tmp_path / "coyo.parquet"
+    pq.write_table(pa.table({
+        "id": [123], "url": ["https://x/1.jpg"], "text": ["c"],
+        "width": [640], "height": [480], "num_faces": [2],
+    }), path)
+    table = tm.build_manifest([(str(path), 0, 1)])
+    assert table.column_names == ["url", "text", "uid", "width", "height"]
+    assert table.column("uid")[0].as_py() == 123
+    # num_faces is a count, not boxes: it cannot drive blurring and is not
+    # carried as if it could.
+    assert "face_bboxes" not in table.column_names

@@ -21,28 +21,33 @@ from typing import Sequence
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .urllist import URL_COLUMN_NAMES
+from . import dataset_schema
 
-#: Only what img2dataset needs. Carrying the upstream schema would inflate
-#: every manifest and tie the corpus to whatever columns upstream happens to
-#: ship.
-OUTPUT_COLUMN = "url"
+#: The names the manifest writes, whatever upstream called them.
+#:
+#: Upstream spellings differ — DataComp uses url/text/uid/face_bboxes, COYO
+#: uses id instead of uid, Re-LAION is uppercase throughout — so the roles are
+#: resolved per corpus by dataset_schema and the columns renamed here. Every
+#: downstream step then sees one schema, and img2dataset can be given the same
+#: --url_col / --caption_col regardless of source.
+#:
+#: Scores, NSFW probabilities and dedup signals are left behind: they inflate
+#: every manifest and are recoverable upstream by identifier.
+URL_COLUMN = "url"
+CANONICAL = {
+    "url": "url",
+    "caption": "text",
+    "identifier": "uid",
+    "width": "width",
+    "height": "height",
+    "face_boxes": "face_bboxes",
+}
 
 Piece = tuple[str, int, int]   # (path, start row, end row exclusive)
 
 
 class ManifestError(ValueError):
     """The manifest cannot be built exactly as the plan describes it."""
-
-
-def _url_column(names: Sequence[str], path: str) -> str:
-    for candidate in URL_COLUMN_NAMES:
-        if candidate in names:
-            return candidate
-    raise ManifestError(
-        f"{path} has no URL column; columns are {list(names)}, "
-        f"expected one of {list(URL_COLUMN_NAMES)}"
-    )
 
 
 def build_manifest(pieces: Sequence[Piece]) -> pa.Table:
@@ -68,10 +73,25 @@ def build_manifest(pieces: Sequence[Piece]) -> pa.Table:
                 "one of them is stale."
             )
 
-        column = _url_column(handle.schema_arrow.names, path)
-        table = pq.read_table(path, columns=[column]).slice(start, end - start)
-        if column != OUTPUT_COLUMN:
-            table = table.rename_columns([OUTPUT_COLUMN])
+        names = list(handle.schema_arrow.names)
+        try:
+            schema = dataset_schema.resolve(names)
+        except dataset_schema.SchemaError as exc:
+            raise ManifestError(f"{path}: {exc}") from exc
+
+        # Optional roles are carried when upstream has them and skipped when
+        # it does not: a corpus without captions or face boxes is a fact
+        # about that corpus, not an error here.
+        wanted = schema.columns_to_carry()
+        renamed = [CANONICAL[role] for role, name in (
+            ("url", schema.url), ("caption", schema.caption),
+            ("identifier", schema.identifier), ("width", schema.width),
+            ("height", schema.height), ("face_boxes", schema.face_boxes),
+        ) if name]
+
+        table = pq.read_table(path, columns=wanted).slice(start, end - start)
+        if wanted != renamed:
+            table = table.rename_columns(renamed)
         chunks.append(table)
 
     return chunks[0] if len(chunks) == 1 else pa.concat_tables(chunks)

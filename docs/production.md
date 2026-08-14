@@ -44,6 +44,55 @@ only control. It doubles as the ramp: 0003 measured one and two nodes and
 nothing above, so the first wave is small and its yield is checked before the
 next.
 
+## What each sample carries, and one irreversible choice
+
+| Role | Kept as | Why |
+|---|---|---|
+| URL | `url` | the image |
+| caption | **`text`** | DINOv3 needs none, but the text-to-image stage video models train first cannot be done without it |
+| identifier | `uid` | traces a sample back upstream |
+| size | `width` / `height` | how much of the corpus is below DINOv3's 256px global crop |
+| face boxes | `face_bboxes` | the only thing that makes blurring possible |
+
+Carrying only the URL — which an earlier draft of this pipeline did — would
+have produced 23 TB with no captions, deciding by omission whether the corpus
+can serve a text-conditioned model.
+
+### Upstream names differ per corpus, so they are resolved rather than assumed
+
+| Corpus | URL | caption | identifier | size | face boxes |
+|---|---|---|---|---|---|
+| DataComp-1B | `url` | `text` | `uid` | `original_width/height` | `face_bboxes` |
+| COYO-700M | `url` | `text` | **`id`** | `width/height` | **none** (`num_faces` is a count) |
+| Re-LAION-5B | **`URL`** | **`TEXT`** | `hash` | `WIDTH/HEIGHT` | **none** |
+
+Matching DataComp's spellings exactly — which the pipeline did — would have
+carried no caption at all from Re-LAION and no identifier from either of the
+others. Silently, because a missing optional column is not an error anywhere
+downstream.
+
+`core/dataset_schema.py` resolves the roles per corpus and the manifest
+renames them, so every later step sees one schema. LAION's own dataset card
+warns that naming is not uniform even across its own repositories, so each
+run records what it bound to what.
+
+**Face blurring is only possible for DataComp-1B.** COYO records how many
+faces there are, not where; Re-LAION records neither. `OD_BLUR_FACES=1` on
+those corpora is a request that cannot be met, and the run stops rather than
+quietly producing unblurred images.
+
+### Face blurring has no default
+
+`OD_BLUR_FACES` must be set to `0` or `1`; the run refuses otherwise.
+
+DataComp blurs by default, using `face_bboxes`. Blurring is **irreversible**
+without re-downloading, it applies to roughly 902 million images, and it is a
+legal question rather than a technical one. A default either way would settle
+that by accident.
+
+`face_bboxes` is stored with every sample regardless, so choosing `0` now
+does not close the door on blurring later.
+
 ## The health guard
 
 On 2026-07-28 a day-long loss of external connectivity destroyed 474 tasks.

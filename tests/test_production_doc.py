@@ -72,3 +72,47 @@ def test_the_documented_scale_matches_the_measured_metadata() -> None:
     assert "1,387,173,656" in doc
     assert "1,388" in doc
     assert "173,656" in doc, "the short final task must be stated"
+
+
+# --------------------------------------------------------------------------
+# What img2dataset is told, against what DataComp itself passes
+# --------------------------------------------------------------------------
+
+RUNNER = (Path(__file__).resolve().parent.parent / "scripts"
+          / "production_task.sh")
+
+
+def test_the_caption_column_is_passed_to_img2dataset() -> None:
+    """DataComp's own download_upstream.py passes caption_col="text".
+
+    Without it the shards hold no captions, and the text-to-image stage that
+    video models train first becomes impossible from this corpus.
+    """
+    assert "--caption_col text" in RUNNER.read_text()
+
+
+def test_the_upstream_identifier_is_preserved() -> None:
+    """DataComp passes save_additional_columns=["uid"]. It is how a sample
+    is traced back to upstream metadata."""
+    assert "uid" in RUNNER.read_text()
+    assert "--save_additional_columns" in RUNNER.read_text()
+
+
+def test_face_blurring_must_be_chosen_explicitly() -> None:
+    """Irreversible, applies to 902 million images, and legally relevant.
+
+    DataComp blurs by default; a silent default either way decides a
+    compliance question by accident, so the run refuses until it is set.
+    """
+    runner = RUNNER.read_text()
+    assert "OD_BLUR_FACES is not set" in runner
+    assert "exit 2" in runner
+    # Behaviour, not spelling: the refusal itself is exercised in
+    # tests/test_production_task.py.
+
+
+def test_the_document_records_the_choice_and_that_it_is_irreversible() -> None:
+    doc = DOC.read_text()
+    assert "face" in doc.lower()
+    assert "irreversible" in doc.lower()
+    assert "OD_BLUR_FACES" in doc
