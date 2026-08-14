@@ -243,12 +243,23 @@ fi
 # The production path was proven here after seven blockers were found one at
 # a time on the cluster. The experiment path is a different job body with
 # different variables; proving it costs a minute.
-step "5. experiment arm 2 (threads 128, retries 0 via arm 4)"
+step "5. experiment arm -> task mapping, end to end"
+# A plan with at least 12 tasks, so arm 1 can reach task 8 the way it will
+# in production. The unit tests agree with production_job.sh's formula, but
+# the two have never been run together: if the offset did not propagate,
+# arm 1 would land on task 0, set the pilot's partial output aside and
+# re-download it, and the measurement would be meaningless.
+dock -v "${REPO}:/work" -v "${WORK}/corpus:/corpus" -v "${WORK}/out:/out" \
+  "${IMAGE}" python /work/scripts/plan_partition.py \
+  /corpus/datacomp/datacomp_1b/upstream_metadata \
+  --urls-per-task 2 --json /out/production/plan_exp.json >/dev/null \
+  || fail "could not build the 12-task plan"
+export OD_PLAN="${WORK}/out/production/plan_exp.json"
 export OD_JOB_SCRIPT="${REPO}/scripts/experiment_0004_job.sh"
 export OD_ARRAY_RANGE="1-4"
-export OD_EXP_MAX_URLS=8          # the whole fixture, so the arm completes
+export OD_EXP_MAX_URLS=2          # a whole slice, so the arm completes
 export OD_TASK_ROOT="${WORK}/out/exp_shards"
-if ! bash "${REPO}/scripts/submit_production.sh" --from 0 --to 2 --dry-run \
+if ! bash "${REPO}/scripts/submit_production.sh" --from 8 --to 11 --dry-run \
        > "${WORK}/exp_submit.log" 2>&1; then
   fail "generating the experiment job failed"
   sed 's/^/    /' "${WORK}/exp_submit.log" | tail -6
@@ -258,8 +269,6 @@ else
     || fail "the dry run does not say what the arms differ in"
 
   EXP_JOB="${OD_LOGDIR}/production_job.generated.sh"
-  # Arm 4 -> task 4 - (-7)... the fixture only has tasks 0..2, so run arm 1
-  # against the offset the job body sets and check it reaches a real task.
   PATH="${SHIM}:${PATH}" PBS_ARRAY_INDEX=1 bash "${EXP_JOB}" \
     > "${WORK}/exp_job.log" 2>&1
   EXP_RC=$?
@@ -275,10 +284,25 @@ else
     fail "arm settings did NOT reach the container"
     grep -E "fetch|threads|max urls" "${WORK}/exp_job.log" | sed 's/^/    /'
   fi
-  if grep -q "max urls    : 8 (capped)" "${WORK}/exp_job.log"; then
+  if grep -q "max urls    : 2 (capped)" "${WORK}/exp_job.log"; then
     pass "OD_MAX_URLS reached the container"
   else
     fail "OD_MAX_URLS did NOT reach the container"
+  fi
+
+  # The link that was never proven: PBS index 1 must become plan task 8.
+  # Landing on task 0 would overwrite the pilot and measure nothing.
+  if grep -qE "^task        : 8$" "${WORK}/exp_job.log"; then
+    pass "PBS index 1 became task 8 (offset -7 propagated)"
+  else
+    fail "arm 1 did NOT reach task 8"
+    grep -E "^(array idx|task) " "${WORK}/exp_job.log" | sed "s/^/    /"
+  fi
+  if [ -f "${OD_TASK_ROOT}/task-000008/DONE.json" ]; then
+    pass "task-000008 completed under the arm's settings"
+  else
+    fail "task-000008 did not complete"
+    tail -12 "${WORK}/exp_job.log" | sed "s/^/    /"
   fi
 fi
 
