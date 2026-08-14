@@ -184,3 +184,13 @@ def test_submit_without_a_plan_says_how_to_make_one(env) -> None:
     result = run(env, "submit", "--from", "0", "--to", "7")
     assert result.returncode != 0
     assert "od.sh plan" in result.stderr
+
+
+def test_report_reaches_our_own_task_root(env) -> None:
+    """The pilot report reads what we produced, under our own account, not
+    the predecessor's tree."""
+    result = run(env, "--dry-run", "report")
+    assert result.returncode == 0, result.stderr
+    assert "inspect_pilot.py" in result.stdout
+    assert "/out/datacomp/datacomp_1b/raw_shards" in result.stdout
+    assert "pilot_report.json" in result.stdout

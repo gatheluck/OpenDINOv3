@@ -32,6 +32,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   resolution         how large the images are, before downloading any
   verify             does what arrived match what the metadata claimed
   submit --from N --to M   send one production wave to the queue
+  report             does the pilot justify widening the wave
   plan               partition the metadata into tasks, writing plan.json
   assess <task dir>  whether a finished task is worth keeping
   exec <script> ...  any script in scripts/, with the standard binds
@@ -88,6 +89,11 @@ case "${SUBCOMMAND}" in
       --files "${OD_SAMPLE_FILES:-40}" \
       --baseline "$(in_out "${PRODUCTION}")/resolution.json" \
       --json "$(in_out "${PRODUCTION}")/verify_sizes.json" "$@"
+    ;;
+  report)
+    run python /work/scripts/inspect_pilot.py \
+      "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
+      --json "$(in_out "${PRODUCTION}")/pilot_report.json" "$@"
     ;;
   submit)
     # NOT through the container: qsub does not exist inside the image.
