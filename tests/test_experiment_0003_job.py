@@ -82,8 +82,12 @@ def server(tmp_path_factory):
         proc.wait(timeout=10)
 
 
-def run_job(server, base):
-    """Run the real job script against a tree rooted at `base`."""
+def run_job(server, base, node_local=None):
+    """Run the real job script against a tree rooted at `base`.
+
+    `node_local` stands in for $PBS_LOCALDIR and must not sit under `base`.
+    """
+    node_local = node_local or (base.parent / f"{base.name}_nodelocal")
     urls_dir = base / "urls"
     urls_dir.mkdir(exist_ok=True)
     pq.write_table(
@@ -105,10 +109,14 @@ def run_job(server, base):
         "OD_NODES": "1",
         "OD_THREADS": "2",
         "OD_SAMPLES_PER_SHARD": str(SAMPLES_PER_SHARD),
-        "PBS_LOCALDIR": str(base / "local"),
+        # Deliberately OUTSIDE the shared tree: $PBS_LOCALDIR is node-local,
+        # and a test that puts it under the shared root would let a
+        # node-local bind pass as shared storage. That is how the first
+        # version of this test passed while the bug was present.
+        "PBS_LOCALDIR": str(node_local),
     }
     (base / "fake.sif").write_bytes(b"")
-    (base / "local").mkdir(exist_ok=True)
+    node_local.mkdir(parents=True, exist_ok=True)
 
     result = subprocess.run(["bash", str(JOB)], capture_output=True, text=True,
                             env=env)
@@ -215,3 +223,76 @@ def test_a_second_run_into_the_same_directory_works_and_does_not_mix(
         f"the second run has {live_shards} shards but attempt 1 wrote "
         f"{first_shards}; runs are being mixed"
     )
+
+
+def test_every_bind_source_is_shared_or_created_by_the_script(job_run) -> None:
+    """The invariant that catches a node-local path without a second node.
+
+    The scratch directory lives under $PBS_LOCALDIR, which ABCI's
+    documentation states is node-local. The job created it on the node it ran
+    on; every other node had none, so singularity failed to bind it and
+    exited 255 before the worker started. node1 wrote nothing and the
+    analysis compared half the work against the whole of it.
+
+    No local test can allocate a second node. It does not need to: a bind
+    source must either live on shared storage or be created by the script
+    that binds it. That holds for one node and for a hundred, and it is
+    checkable here.
+    """
+    result, exp_out = job_run
+    scripts = sorted(exp_out.rglob("run.sh"))
+    assert scripts, "no node script was generated"
+
+    # The URL list and the repo are on shared storage; so is the experiment
+    # output. Nothing else may be assumed to exist on another node.
+    shared_roots = [str(REPO), str(exp_out), str(exp_out.parent / "urls")]
+
+    for script in scripts:
+        text = script.read_text()
+        mkdirs = [line.split("mkdir -p", 1)[1].strip().strip('"')
+                  for line in text.splitlines() if "mkdir -p" in line]
+        exec_line = next(l for l in text.splitlines() if "singularity exec" in l)
+        parts = exec_line.split()
+        sources = [parts[i + 1].split(":")[0]
+                   for i, part in enumerate(parts) if part == "--bind"]
+        assert sources, f"{script} binds nothing"
+
+        for source in sources:
+            shared = any(source.startswith(root) for root in shared_roots)
+            created = any(made.startswith(source) for made in mkdirs)
+            assert shared or created, (
+                f"{script.relative_to(exp_out)} binds {source}, which is "
+                "neither on shared storage nor created by the script. On any "
+                "node but the first it will not exist."
+            )
+
+
+def test_the_node_check_runs_before_any_phase(job_run) -> None:
+    """Nodes are already allocated, so checking them costs seconds.
+
+    Spending 35 minutes of phases on a node that cannot start the container
+    is the expensive failure; this makes it a one-minute one.
+    """
+    result, exp_out = job_run
+    out = result.stdout
+    assert "node check" in out
+    assert out.index("node check") < out.index("phase1_single"), \
+        "the check must come before the phases, or it saves nothing"
+    assert ": ok" in out
+    assert (exp_out / "nodecheck" / "node0" / "probe.sh").is_file()
+
+
+def test_the_node_check_uses_the_same_binds_as_the_real_phases(
+    job_run,
+) -> None:
+    """A check that takes a different path checks nothing."""
+    _, exp_out = job_run
+    probe = (exp_out / "nodecheck" / "node0" / "probe.sh").read_text()
+    run = next(exp_out.rglob("phase1_single/node0/run.sh")).read_text()
+
+    def binds(text: str) -> set[str]:
+        line = next(l for l in text.splitlines() if "singularity exec" in l)
+        parts = line.split()
+        return {parts[i + 1] for i, p in enumerate(parts) if p == "--bind"}
+
+    assert binds(probe) == binds(run)

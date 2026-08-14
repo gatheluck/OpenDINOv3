@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -26,13 +27,37 @@ SINGLE = ("phase1_single", "phase3_single")
 MULTI = "phase2_multi"
 
 
-def load_phase(directory: Path) -> tuple[RunSummary, int] | None:
+@dataclass(frozen=True)
+class Phase:
+    """One phase, and whether all of the nodes it wanted actually reported.
+
+    A phase that lost a node did a fraction of the work in something close to
+    the full time. Comparing that against a complete phase is comparing half
+    a job with a whole one — it produced a 0.63× "distribution penalty" that
+    was nothing but a missing node. Incomplete phases are therefore excluded
+    from the verdict rather than quietly averaged into it.
+    """
+
+    run: RunSummary
+    nodes: int
+    expected: int | None
+
+    @property
+    def complete(self) -> bool:
+        return self.expected is None or self.nodes >= self.expected
+
+
+def load_phase(directory: Path) -> Phase | None:
     """Sum every node's shards for one phase. Wall time is the phase's own."""
     if not directory.is_dir():
         return None
 
     wall_file = directory / "wall_seconds"
     wall = float(wall_file.read_text().strip()) if wall_file.is_file() else 0.0
+
+    expected_file = directory / "expected_nodes"
+    expected = (int(expected_file.read_text().strip())
+                if expected_file.is_file() else None)
 
     stats = []
     nodes = 0
@@ -48,7 +73,11 @@ def load_phase(directory: Path) -> tuple[RunSummary, int] | None:
 
     if not stats:
         return None
-    return RunSummary.from_stats(processes=0, wall_seconds=wall, stats=stats), nodes
+    return Phase(
+        run=RunSummary.from_stats(processes=0, wall_seconds=wall, stats=stats),
+        nodes=nodes,
+        expected=expected,
+    )
 
 
 def fmt(value: float | None, spec: str = ".1f") -> str:
@@ -63,11 +92,17 @@ def main() -> int:
     loaded = {name: load_phase(args.outdir / name)
               for name in (*SINGLE, MULTI)}
 
-    single = [loaded[n][0] for n in SINGLE if loaded[n]]
+    incomplete = [name for name, phase in loaded.items()
+                  if phase and not phase.complete]
+
+    single = [loaded[n].run for n in SINGLE
+              if loaded[n] and loaded[n].complete]
     if not single:
-        print(f"no single-node phase found under {args.outdir}", file=sys.stderr)
+        print(f"no complete single-node phase found under {args.outdir}",
+              file=sys.stderr)
         return 2
-    multi = loaded[MULTI][0] if loaded[MULTI] else None
+    multi_phase = loaded[MULTI]
+    multi = multi_phase.run if multi_phase and multi_phase.complete else None
 
     print("experiment 0003 — does spreading across nodes cost anything?")
     print(f"source: {args.outdir}\n")
@@ -79,20 +114,36 @@ def main() -> int:
         if not entry:
             print(f"{name:<14} {'—':>6}   NOT RUN")
             continue
-        run, nodes = entry
+        run, nodes = entry.run, entry.nodes
+        flag = "" if entry.complete else f"  ← INCOMPLETE ({nodes}/{entry.expected} nodes)"
         print(f"{name:<14} {nodes:>6} {run.wall_seconds:>8.0f} "
               f"{run.candidates:>9} {run.successes:>9} "
               f"{fmt(run.yield_rate, '.1%'):>7} "
               f"{fmt(run.successes_per_sec, '.1f'):>9} "
-              f"{fmt(run.dns_fraction, '.1%'):>7}")
+              f"{fmt(run.dns_fraction, '.1%'):>7}{flag}")
 
     verdict = np.judge_distribution(single=single, multi=multi)
+
+    if incomplete:
+        print()
+        for name in incomplete:
+            phase = loaded[name]
+            print(f"⚠️  {name}: only {phase.nodes} of {phase.expected} nodes "
+                  "reported. It did a fraction of the work in close to the "
+                  "full time, so its rate is not comparable and it is "
+                  "excluded from the verdict below.")
 
     print("\npre-registered criteria")
     print("-" * 46)
     if verdict.distribution_neutral is None:
         skipped = args.outdir / f"{MULTI}_SKIPPED"
-        why = skipped.read_text().strip() if skipped.is_file() else "phase absent"
+        if skipped.is_file():
+            why = skipped.read_text().strip()
+        elif multi_phase is not None:
+            why = (f"incomplete — {multi_phase.nodes} of "
+                   f"{multi_phase.expected} nodes reported")
+        else:
+            why = "phase absent"
         print(f"  multi-node phase : NOT RUN ({why})")
         print("  → the question this experiment exists for is unanswered.")
         print("    The single-node phases below are a drift measurement only.")
