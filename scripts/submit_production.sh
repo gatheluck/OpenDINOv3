@@ -120,6 +120,16 @@ else
   warn "could not read the plan's task count; the range is unchecked"
 fi
 
+# ABCI's qsub rejects an array index of 0:
+#   qsub: Array job indices must be greater than 0.  [-J 0-7]
+# Plan task ids are 0-based and stay that way, so the range is shifted up
+# and production_job.sh subtracts the offset again. One place, both halves
+# visible in the summary below, because an off-by-one here downloads the
+# wrong task while every check still passes.
+TASK_ID_OFFSET=1
+J_FROM=$((FROM + TASK_ID_OFFSET))
+J_TO=$((TO + TASK_ID_OFFSET))
+
 COUNT=$((TO - FROM + 1))
 DONE_ALREADY=$(find "${TASK_ROOT}" -maxdepth 2 -name DONE.json 2>/dev/null | wc -l | tr -d ' ')
 
@@ -137,6 +147,7 @@ JOB="${OD_LOGDIR}/production_job.generated.sh"
   echo "export OD_THREADS=$(printf '%q' "${THREADS}")"
   echo "export OD_SAMPLES_PER_SHARD=$(printf '%q' "${SAMPLES_PER_SHARD}")"
   echo "export OD_BLUR_FACES=$(printf '%q' "${OD_BLUR_FACES}")"
+  echo "export OD_TASK_ID_OFFSET=$(printf '%q' "${TASK_ID_OFFSET}")"
   echo
   cat "${REPO}/scripts/production_job.sh"
 } > "${JOB}"
@@ -147,6 +158,8 @@ cat <<SUMMARY
 production wave
 
   tasks      : ${FROM}..${TO}  (${COUNT} subjobs, 1 node each)
+  array      : -J ${J_FROM}-${J_TO}  (PBS indices; offset ${TASK_ID_OFFSET},
+               because ABCI refuses index 0)
   plan       : ${OD_PLAN}$([ -n "${PLAN_TASKS}" ] && echo " (${PLAN_TASKS} tasks total)")
   metadata   : ${OD_META_ROOT}
   output     : ${TASK_ROOT}
@@ -167,9 +180,9 @@ SUMMARY
 
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo "dry run — not submitting. Would run:"
-  echo "  ${SUBMIT:-<submitter>} --nodes 1 --walltime ${WALLTIME} ${JOB} -- -J ${FROM}-${TO}"
+  echo "  ${SUBMIT:-<submitter>} --nodes 1 --walltime ${WALLTIME} ${JOB} -- -J ${J_FROM}-${J_TO}"
   echo
   exit 0
 fi
 
-exec "${SUBMIT}" --nodes 1 --walltime "${WALLTIME}" "${JOB}" -- -J "${FROM}-${TO}"
+exec "${SUBMIT}" --nodes 1 --walltime "${WALLTIME}" "${JOB}" -- -J "${J_FROM}-${J_TO}"

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Stands in for the private repo's od_qsub.sh: takes --nodes/--walltime, then
+# the job file, then `--` and the raw qsub arguments. Forwards to the qsub
+# stub so ABCI's array-index rule is enforced locally.
+set -uo pipefail
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --nodes|--walltime) shift 2 ;;
+    --) shift; ARGS+=("$@"); break ;;
+    *) JOB="$1"; shift ;;
+  esac
+done
+exec "$(dirname "$0")/qsub" -l select=1 "${ARGS[@]}" "${JOB:-}"

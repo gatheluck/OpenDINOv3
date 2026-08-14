@@ -24,13 +24,37 @@
 
 set -uo pipefail
 
-TASK_ID="${PBS_ARRAY_INDEX:-${OD_TASK_ID:-}}"
+# ABCI's qsub refuses an array index of 0:
+#
+#     qsub: Array job indices must be greater than 0.
+#           [-J 0-7]
+#
+# observed 2026-08-14. PBS Pro accepts 0 elsewhere — HPCMP's documentation
+# shows `#PBS -J 0-12:3` running subjob 0 — so this is a site constraint,
+# and the machine is the fact.
+#
+# Plan task ids stay 0-based: the plan describes the data, not the queue.
+# submit_production.sh shifts the submitted range up by OD_TASK_ID_OFFSET
+# and records it here, so the two numbering schemes meet in exactly one
+# place.
+if [ -n "${PBS_ARRAY_INDEX:-}" ]; then
+  TASK_ID=$((PBS_ARRAY_INDEX - ${OD_TASK_ID_OFFSET:-0}))
+  if [ "${TASK_ID}" -lt 0 ]; then
+    echo "❌ array index ${PBS_ARRAY_INDEX} minus offset ${OD_TASK_ID_OFFSET:-0}" >&2
+    echo "   gives task ${TASK_ID}, which cannot exist. The submitted" >&2
+    echo "   range and the offset disagree." >&2
+    exit 1
+  fi
+else
+  TASK_ID="${OD_TASK_ID:-}"
+fi
 if [ -z "${TASK_ID}" ]; then
   echo "❌ no task id: PBS_ARRAY_INDEX is unset and OD_TASK_ID was not given" >&2
   exit 1
 fi
 
 echo "host      : $(hostname)"
+echo "array idx : ${PBS_ARRAY_INDEX:-n/a} (offset ${OD_TASK_ID_OFFSET:-0})"
 echo "task      : ${TASK_ID}"
 echo "started   : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 

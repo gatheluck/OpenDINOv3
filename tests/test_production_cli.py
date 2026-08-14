@@ -36,7 +36,7 @@ def run(script: Path, *args: str) -> subprocess.CompletedProcess:
 SUBMIT = SCRIPTS / "submit_production.sh"
 
 
-def make_env(tmp_path) -> dict:
+def make_env(tmp_path, tasks: int = 8) -> dict:
     """Everything submit_production.sh needs, so a test exercises the guard
     under test rather than a missing prerequisite."""
     import os
@@ -47,8 +47,9 @@ def make_env(tmp_path) -> dict:
     meta.mkdir()
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({
-        "meta_dir": str(meta), "urls_per_task": 1, "total_rows": 8,
-        "tasks": [{"task_id": i, "rows": 1, "pieces": []} for i in range(8)],
+        "meta_dir": str(meta), "urls_per_task": 1, "total_rows": tasks,
+        "tasks": [{"task_id": i, "rows": 1, "pieces": []}
+                  for i in range(tasks)],
     }))
     return {**os.environ,
             "OD_SIF": str(out / "opendinov3.sif"), "OD_PLAN": str(plan),
@@ -224,3 +225,43 @@ def test_an_invalid_blur_choice_is_refused_before_the_queue(tmp_path) -> None:
     env["OD_BLUR_FACES"] = "yes"
     result = submit(env, "--from", "0", "--to", "7", "--dry-run")
     assert result.returncode != 0
+
+
+def test_the_submitted_array_starts_above_zero(tmp_path) -> None:
+    """ABCI's qsub refuses index 0:
+
+        qsub: Array job indices must be greater than 0.  [-J 0-7]
+
+    Observed on 2026-08-14, after a plan and a wave had been prepared. PBS
+    Pro accepts 0 elsewhere, so this is a site rule and the machine is the
+    fact.
+    """
+    env = make_env(tmp_path)
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "-J 1-8" in result.stdout, result.stdout
+
+
+def test_the_offset_is_recorded_so_the_task_id_can_be_recovered(tmp_path
+                                                                ) -> None:
+    """Shifting the range without telling the job would run task 1 for
+    array index 1 — every task off by one, every check still passing."""
+    env = make_env(tmp_path)
+    submit(env, "--from", "0", "--to", "7", "--dry-run")
+    job = (Path(env["OD_LOGDIR"]) / "production_job.generated.sh").read_text()
+    assert "export OD_TASK_ID_OFFSET=1" in job
+
+
+@pytest.mark.parametrize("first,last,expected", [
+    (0, 7, "-J 1-8"),
+    (8, 15, "-J 9-16"),
+    (1387, 1387, "-J 1388-1388"),
+])
+def test_the_shift_holds_across_the_range(tmp_path, first, last, expected
+                                          ) -> None:
+    """Including the last task of the real plan, where an off-by-one would
+    silently drop the tail of the corpus."""
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", str(first), "--to", str(last), "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert expected in result.stdout

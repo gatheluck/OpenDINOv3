@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# A `qsub` that enforces the constraints ABCI's qsub actually enforces, so
+# they are hit on a laptop instead of after a plan, a wave and a wait.
+#
+# Observed on ABCI, 2026-08-14:
+#     qsub: Array job indices must be greater than 0.
+#           [-J 0-7]
+# PBS Pro accepts index 0 elsewhere, so this is a site rule. The machine is
+# the fact; this stub encodes what the machine did.
+set -uo pipefail
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -J)
+      range="$2"
+      start="${range%%-*}"
+      [ "${start}" -gt 0 ] 2>/dev/null || {
+        echo "qsub: Array job indices must be greater than 0." >&2
+        echo "      [-J ${range}]" >&2
+        exit 1; }
+      shift 2 ;;
+    *) shift ;;
+  esac
+done
+echo "1234567[].pbs1"
