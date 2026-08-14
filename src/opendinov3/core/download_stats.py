@@ -38,6 +38,17 @@ SUCCESS_KEY = "success"
 # The message text around them is phrased differently across platforms and
 # urllib versions; the errno is the part that stays put.
 _GAI_ERRNO = re.compile(r"\[Errno -[2345]\]")
+
+# Errors that say THIS machine has no path to the network, as distinct from a
+# remote host refusing. 101 ENETUNREACH, 113 EHOSTUNREACH, 110 ETIMEDOUT at
+# the socket layer.
+#
+# Kept apart from the general failure bucket because it is the signal that
+# identifies an outage rather than bad URLs. On 2026-07-28 a day-long loss of
+# connectivity destroyed 474 tasks; 15.5% of their attempts were Errno 101,
+# which would have been invisible averaged into an "other" bucket that sits
+# near 5% normally.
+_NO_ROUTE_ERRNO = re.compile(r"\[Errno (101|113)\]")
 _HTTP_STATUS = re.compile(r"HTTP Error (\d{3})")
 
 # 408 and 429 are 4xx but worth another attempt; everything else in 4xx is
@@ -56,8 +67,8 @@ MAX_BASELINE_DRIFT = 0.20
 class FailureCounts:
     """A partition of attempts, plus one overlapping count.
 
-    `dns`, `permanent`, `transient` and `other` are disjoint and cover every
-    failure. `rate_limited` is a subset of `transient`, not a fifth bucket,
+    `dns`, `unreachable`, `permanent`, `transient` and `other` are disjoint
+    and cover every failure. `rate_limited` is a subset of `transient`, not a fifth bucket,
     so summing all five double-counts 429s. `total` is every attempt,
     successes included.
     """
@@ -68,6 +79,9 @@ class FailureCounts:
     rate_limited: int
     other: int
     total: int
+    #: Local connectivity failures. Defaulted so existing callers keep
+    #: working; never normal, so any material rate is an outage.
+    unreachable: int = 0
 
     def __add__(self, other: "FailureCounts") -> "FailureCounts":
         return FailureCounts(
@@ -77,6 +91,7 @@ class FailureCounts:
             rate_limited=self.rate_limited + other.rate_limited,
             other=self.other + other.other,
             total=self.total + other.total,
+            unreachable=self.unreachable + other.unreachable,
         )
 
 
@@ -94,6 +109,7 @@ def classify(status_dict: dict[str, int]) -> FailureCounts:
     reporting an unexplained one.
     """
     dns = permanent = transient = rate_limited = other = 0
+    unreachable = 0
     total = 0
 
     for message, count in status_dict.items():
@@ -104,6 +120,10 @@ def classify(status_dict: dict[str, int]) -> FailureCounts:
 
         if _GAI_ERRNO.search(message):
             dns += count
+            continue
+
+        if _NO_ROUTE_ERRNO.search(message):
+            unreachable += count
             continue
 
         http = _HTTP_STATUS.search(message)
@@ -132,6 +152,7 @@ def classify(status_dict: dict[str, int]) -> FailureCounts:
         rate_limited=rate_limited,
         other=other,
         total=total,
+        unreachable=unreachable,
     )
 
 
