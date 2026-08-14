@@ -397,3 +397,41 @@ def test_the_default_settings_are_the_ones_experiment_0004_chose(workspace
     settings = json.loads(
         (task_root / "task-000000" / "DONE.json").read_text())["settings"]
     assert settings["timeout"] == 10 and settings["retries"] == 0
+
+
+def test_a_capped_task_is_not_recorded_as_complete(workspace) -> None:
+    """Experiment 0004 ran tasks 8-11 with OD_MAX_URLS=100000 against a plan
+    that allots each of them 1,000,000 URLs. They wrote DONE.json anyway, so
+    every later wave skips them and 2.7 million URLs are permanently and
+    silently missing — 0.195% of the corpus, marked complete.
+
+    The measurement still has to be recorded, so DONE.json is still written;
+    it just has to say what it is.
+    """
+    plan, task_root = workspace
+    assert run_task(plan, task_root, OD_MAX_URLS="4").returncode == 0
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["partial"] is True
+    assert done["candidates"] == 4
+    assert done["planned_candidates"] == TASK_ROWS
+
+
+def test_a_partial_task_is_redone_rather_than_skipped(workspace) -> None:
+    """The skip exists so a requeued subjob does not re-download good data.
+    A task holding a tenth of its URLs is not good data."""
+    plan, task_root = workspace
+    assert run_task(plan, task_root, OD_MAX_URLS="4").returncode == 0
+    again = run_task(plan, task_root, attempt="retry")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "already complete" not in again.stdout
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["candidates"] == TASK_ROWS
+    assert done.get("partial") is False
+
+
+def test_a_complete_task_is_still_skipped(workspace) -> None:
+    """The guard must not have been bought by re-downloading everything."""
+    plan, task_root = workspace
+    assert run_task(plan, task_root).returncode == 0
+    again = run_task(plan, task_root, attempt="retry")
+    assert "already complete" in again.stdout

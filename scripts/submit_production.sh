@@ -138,7 +138,15 @@ COUNT=$((TO - FROM + 1))
 # offset, so it overrides the range while still range-checking against the
 # plan through --from/--to.
 ARRAY_RANGE="${OD_ARRAY_RANGE:-}"
-DONE_ALREADY=$(find "${TASK_ROOT}" -maxdepth 2 -name DONE.json 2>/dev/null | wc -l | tr -d ' ')
+# Only the range being submitted. Counting the whole tree reported "3
+# task(s) will be skipped" for a wave that skipped none of them, because
+# the three were outside the range.
+DONE_ALREADY=0
+for _t in $(seq "${FROM}" "${TO}"); do
+  _m=$(printf '%s/task-%06d/DONE.json' "${TASK_ROOT}" "${_t}")
+  [ -f "${_m}" ] && grep -q '"partial": true' "${_m}" 2>/dev/null && continue
+  [ -f "${_m}" ] && DONE_ALREADY=$((DONE_ALREADY + 1))
+done
 
 JOB="${OD_LOGDIR}/production_job.generated.sh"
 {
@@ -178,7 +186,7 @@ production wave
   plan       : ${OD_PLAN}$([ -n "${PLAN_TASKS}" ] && echo " (${PLAN_TASKS} tasks total)")
   metadata   : ${OD_META_ROOT}
   output     : ${TASK_ROOT}
-  already done: ${DONE_ALREADY} task(s) carry DONE.json and will be skipped
+  already done: ${DONE_ALREADY} of ${COUNT} in this range are complete and will be skipped
   per node   : ${PROCESSES} processes x ${THREADS} threads
   shard      : ${SAMPLES_PER_SHARD} samples
   blur faces : ${OD_BLUR_FACES}

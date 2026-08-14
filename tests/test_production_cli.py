@@ -265,3 +265,33 @@ def test_the_shift_holds_across_the_range(tmp_path, first, last, expected
     result = submit(env, "--from", str(first), "--to", str(last), "--dry-run")
     assert result.returncode == 0, result.stdout + result.stderr
     assert expected in result.stdout
+
+
+def test_only_the_submitted_range_is_counted_as_already_done(tmp_path
+                                                             ) -> None:
+    """It reported '3 task(s) will be skipped' for a wave that skipped none:
+    the three were tasks 8-10 and the wave was 12-19. A count that includes
+    work outside the range is not a count of what this wave will skip."""
+    env = make_env(tmp_path, tasks=1388)
+    root = Path(env["OD_TASK_ROOT"])
+    for task_id in (8, 9, 10):
+        marker = root / f"task-{task_id:06d}"
+        marker.mkdir(parents=True)
+        (marker / "DONE.json").write_text(json.dumps({"task_id": task_id}))
+    result = submit(env, "--from", "12", "--to", "19", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "already done: 0 of 8" in result.stdout, result.stdout
+
+
+def test_a_partial_task_in_range_does_not_count_as_done(tmp_path) -> None:
+    """A capped task will be redone, so counting it as skipped would
+    understate the wave."""
+    env = make_env(tmp_path, tasks=1388)
+    root = Path(env["OD_TASK_ROOT"])
+    for task_id, partial in ((12, True), (13, False)):
+        marker = root / f"task-{task_id:06d}"
+        marker.mkdir(parents=True)
+        (marker / "DONE.json").write_text(json.dumps(
+            {"task_id": task_id, "partial": partial}))
+    result = submit(env, "--from", "12", "--to", "19", "--dry-run")
+    assert "already done: 1 of 8" in result.stdout, result.stdout
