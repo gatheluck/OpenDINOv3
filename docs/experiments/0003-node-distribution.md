@@ -1,6 +1,6 @@
 # Experiment 0003: Does spreading work across nodes cost anything?
 
-Status: **three attempts, none measuring the question. Fourth not yet run.**
+Status: **run 2026-08-14 on the fourth attempt. Not rejected — distribution costs about 3%.**
 Date: 2026-08-13
 
 ## Question
@@ -360,9 +360,76 @@ count, none of which need a second node to check:
 - no staged path is an absolute symlink, and the tree survives being moved
 - a phase that lost a node cannot produce a verdict
 
-### Next
+### Attempt 4, 2026-08-14: measured
 
-Fourth attempt. The question the experiment exists for is still unanswered:
-no measurement of node distribution has been taken.
+Job wall 37 minutes, exit 0, 600 shards, every node exit 0, stderr empty. The
+node check passed on both nodes before the phases started.
 
-No manual cleanup is needed — the job sets previous attempts aside itself.
+| Phase | Nodes | Wall s | Candidates | Successes | Yield | Succ/s | DNS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| phase1_single | 1 | 731 | 200,000 | 130,926 | 65.5% | 179.1 | 6.1% |
+| phase2_multi | **2** | 752 | 200,000 | 130,495 | 65.2% | **173.5** | **6.0%** |
+| phase3_single | 1 | 725 | 200,000 | 129,701 | 64.9% | 178.9 | 6.2% |
+
+**NOT REJECTED.**
+
+- **Distribution ratio 0.97×** against a 0.8 threshold. Two nodes at 16
+  processes each deliver 97% of one node at 32.
+- **Baseline drift 0.1%.** The two single-node phases agree to within a
+  fifth of a percent, so the 3% gap sits only just outside the noise and
+  cannot be inflated into a real penalty.
+- Yield 65.5% / 65.2% / 64.9%.
+- **DNS 6.1% / 6.0% / 6.2%.**
+
+### The 89% claim does not reproduce
+
+The handoff records a 4-node run failing 89% of its DNS lookups, and that one
+observation is what stopped every scaling decision. At two nodes the DNS
+failure rate is **6.0%, marginally lower than the 6.1% measured on one**.
+
+This does not explain what happened in that run, and it does not extend to
+four nodes. What it does is remove the reason to treat node count as
+dangerous without evidence. Combined with the DNS probe — flat from 1 to 512
+concurrent lookups — and experiment 0002 — flat across 8, 32 and 64 processes
+— the ~6% is a property of the URL list, not of how hard it is fetched.
+
+### What this settles for production
+
+Per-node throughput at the 0002 optimum of 32 processes, measured twice on
+different tasks: 186.7 succ/s (0002, task-000674) and 179.0 succ/s (here,
+task-000646). One task is 1,000,000 URLs at ~65% yield, so **about one
+node-hour per task**, and 735 remaining tasks is roughly **744 node-hours**.
+
+| Nodes | Days |
+|---:|---:|
+| 1 | 31.0 |
+| 2 | 16.0 |
+| 4 | 8.0 |
+| 8 | 4.0 |
+| 16 | 2.0 |
+
+**And it changes the shape of the production job.** Since spreading is free,
+there is no reason to run multi-node jobs at all: independent single-node
+jobs give the same throughput, schedule far more easily on a full cluster,
+fail independently, and need none of pbsdsh, cross-node staging or shared
+scratch — the source of all four bugs in this experiment.
+
+ABCI allows 200 concurrently executing jobs and 75,000 tasks per array job,
+so the remaining work fits in one array-job submission of single-node tasks.
+
+### Also measured, as a by-product
+
+The two single-node phases here (731 s, 725 s) and experiment 0002's
+32-process run (692 s) used **different tasks** — 000646 and 000674 — with
+identical settings. The spread is 5%, and within this experiment 0.1%.
+**Tasks do not differ measurably in download speed**, which removes one of
+the three candidate explanations for the 3.5× gap against the historical
+figure. Cluster load and shard size remain.
+
+### Why it took four attempts
+
+Recorded above in full. In summary: absolute symlink, stale leftovers,
+node-local scratch, and each time a test written for the case rather than the
+class. The invariants that replaced them — bind sources shared or
+self-created, idempotent staging, no absolute symlinks, and no verdict from a
+phase that lost a node — are what made the fourth attempt land.
