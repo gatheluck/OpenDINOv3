@@ -266,3 +266,10 @@ def test_the_dry_run_shows_what_each_arm_will_do(env) -> None:
     for fragment in ("OD_THREADS=32", "OD_THREADS=128",
                      "OD_RETRIES=2", "OD_RETRIES=0"):
         assert fragment in result.stdout, (fragment, result.stdout)
+
+
+def test_arms_reaches_our_own_task_root(env) -> None:
+    result = run(env, "--dry-run", "arms")
+    assert result.returncode == 0, result.stderr
+    assert "compare_arms.py" in result.stdout
+    assert "/out/datacomp/datacomp_1b/raw_shards" in result.stdout
