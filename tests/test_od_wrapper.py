@@ -123,3 +123,13 @@ def test_our_own_output_is_writable(env) -> None:
     out = run(env, "--dry-run", "inspect").stdout
     assert ":/out " in out + " ", "the output bind must not be read-only"
     assert ":/out:ro" not in out
+
+
+def test_verify_reaches_the_existing_shards(env) -> None:
+    """The comparison runs over the predecessor's downloaded tree, which is
+    bound read-only, and against the baseline the resolution run wrote."""
+    result = run(env, "--dry-run", "verify")
+    assert result.returncode == 0, result.stderr
+    assert "verify_recorded_sizes.py" in result.stdout
+    assert "/corpus/datacomp/datacomp_1b/raw_shards" in result.stdout
+    assert "resolution.json" in result.stdout
