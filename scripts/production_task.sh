@@ -25,6 +25,17 @@ THREADS="${OD_THREADS:-32}"
 SAMPLES_PER_SHARD="${OD_SAMPLES_PER_SHARD:-10000}"
 ATTEMPT_TAG="${OD_ATTEMPT_TAG:-${PBS_JOBID:-manual}}"
 
+# Fetch settings, variable because the first wave measured 34.9 URLs/sec/node
+# against a model of 277 while using 0.40% of the bandwidth and 0.53 of 192
+# cores. That leaves per-request latency as the cost, and these are the knobs
+# that move it. The defaults are what that wave ran, so nothing changes unless
+# an experiment sets them.
+TIMEOUT="${OD_TIMEOUT:-10}"
+RETRIES="${OD_RETRIES:-2}"
+# Cap the manifest so an experiment arm finishes inside its walltime. Without
+# it an arm measures how long a kill takes, not how fast the setting is.
+MAX_URLS="${OD_MAX_URLS:-0}"
+
 # Face blurring has no default on purpose. It is irreversible, it applies to
 # 902 million images, and it is a legal question rather than a technical one.
 # DataComp's own downloader blurs by default; a silent default either way
@@ -57,6 +68,8 @@ echo "task        : ${OD_TASK_ID}"
 echo "directory   : ${TASK_DIR}"
 echo "processes   : ${PROCESSES} (threads ${THREADS})"
 echo "shard       : ${SAMPLES_PER_SHARD} samples"
+echo "fetch       : timeout ${TIMEOUT}s, retries ${RETRIES}"
+[ "${MAX_URLS}" -gt 0 ] && echo "max urls    : ${MAX_URLS} (capped)"
 echo "blur faces  : ${OD_BLUR_FACES}"
 echo "started     : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -93,6 +106,12 @@ python "${REPO}/scripts/build_task_manifest.py" \
   --plan "${OD_PLAN}" --task-id "${OD_TASK_ID}" \
   --output "${TASK_DIR}/urls.parquet" || {
     echo "❌ task ${OD_TASK_ID}: could not build the manifest" >&2; exit 1; }
+
+if [ "${MAX_URLS}" -gt 0 ]; then
+  python "${REPO}/scripts/cap_manifest.py" \
+    "${TASK_DIR}/urls.parquet" "${MAX_URLS}" || {
+      echo "❌ could not cap the manifest" >&2; exit 1; }
+fi
 
 # --- download ----------------------------------------------------------------
 echo "──────────────────────────────────────────────────────────"
@@ -182,26 +201,33 @@ fi
 [ "${OD_SKIP_REENCODE:-0}" = "1" ] && REENCODE_ARGS=(--skip_reencode True)
 
 t0=$(date +%s)
-img2dataset \
-  --url_list "${TASK_DIR}/urls.parquet" \
-  --input_format parquet \
-  --url_col url \
-  "${CAPTION_ARGS[@]}" \
-  "${EXTRA_ARGS[@]}" \
-  "${BLUR_ARGS[@]}" \
-  "${REENCODE_ARGS[@]}" \
-  --output_folder "${TASK_DIR}/shards" \
-  --output_format webdataset \
-  --image_size 256 \
-  --resize_mode no \
-  --processes_count "${PROCESSES}" \
-  --thread_count "${THREADS}" \
-  --number_sample_per_shard "${SAMPLES_PER_SHARD}" \
-  --compute_hash sha256 \
-  --timeout 10 \
-  --retries 2 \
-  --enable_wandb False \
-  --incremental_mode incremental \
+# The argv actually used, recorded before the run. DONE.json records what we
+# INTENDED; this records what was RUN. They diverge the moment a value is
+# hard-coded back into the call, and an experiment that misattributes an
+# arm's result to the wrong setting is worse than no experiment.
+IMG2DATASET_ARGS=(
+  --url_list "${TASK_DIR}/urls.parquet"
+  --input_format parquet
+  --url_col url
+  "${CAPTION_ARGS[@]}"
+  "${EXTRA_ARGS[@]}"
+  "${BLUR_ARGS[@]}"
+  "${REENCODE_ARGS[@]}"
+  --output_folder "${TASK_DIR}/shards"
+  --output_format webdataset
+  --image_size 256
+  --resize_mode no
+  --processes_count "${PROCESSES}"
+  --thread_count "${THREADS}"
+  --number_sample_per_shard "${SAMPLES_PER_SHARD}"
+  --compute_hash sha256
+  --timeout "${TIMEOUT}"
+  --retries "${RETRIES}"
+  --enable_wandb False
+  --incremental_mode incremental
+)
+printf '%s\n' "${IMG2DATASET_ARGS[@]}" > "${TASK_DIR}/img2dataset.cmd"
+img2dataset "${IMG2DATASET_ARGS[@]}" \
   > "${TASK_DIR}/img2dataset.log" 2>&1
 rc=$?
 t1=$(date +%s)
@@ -227,9 +253,10 @@ fi
 
 # --- done --------------------------------------------------------------------
 python - "${TASK_DIR}" "${OD_TASK_ID}" "$((t1 - t0))" \
-        "${PROCESSES}" "${THREADS}" "${SAMPLES_PER_SHARD}" <<'PY'
+        "${PROCESSES}" "${THREADS}" "${SAMPLES_PER_SHARD}" \
+        "${TIMEOUT}" "${RETRIES}" <<'PY'
 import json, sys, datetime, pathlib
-task_dir, task_id, wall, procs, threads, sps = sys.argv[1:7]
+task_dir, task_id, wall, procs, threads, sps, timeout, retries = sys.argv[1:9]
 health = json.loads((pathlib.Path(task_dir) / "health.json").read_text())
 (pathlib.Path(task_dir) / "DONE.json").write_text(json.dumps({
     "task_id": int(task_id),
@@ -241,7 +268,8 @@ health = json.loads((pathlib.Path(task_dir) / "health.json").read_text())
     "settings": {"processes": int(procs), "threads": int(threads),
                  "samples_per_shard": int(sps),
                  "image_size": 256, "resize_mode": "no",
-                 "compute_hash": "sha256", "timeout": 10, "retries": 2},
+                 "compute_hash": "sha256",
+                 "timeout": int(timeout), "retries": int(retries)},
 }, indent=1))
 PY
 
