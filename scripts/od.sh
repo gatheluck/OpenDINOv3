@@ -129,6 +129,11 @@ case "${SUBCOMMAND}" in
     # branch and reported an unknown subcommand.
     export OD_JOB_SCRIPT="${REPO}/scripts/experiment_0004_job.sh"
     export OD_ARRAY_RANGE="1-4"
+    # An arm is 100,000 URLs. At the first wave's 34.9 URLs/sec that is 48
+    # minutes, and a faster arm is quicker still. Requesting the production
+    # default of 12 h would make the arms harder to schedule and more likely
+    # to run into the end of the reservation, for no benefit.
+    export OD_PROD_WALLTIME="${OD_PROD_WALLTIME:-02:00:00}"
     do_submit --from 8 --to 11 "$@"
     ;;
   submit)

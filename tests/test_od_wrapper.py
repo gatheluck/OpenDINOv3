@@ -247,3 +247,22 @@ def test_a_production_wave_still_uses_the_production_body(env) -> None:
     result = run(env, "--dry-run", "submit", "--from", "0", "--to", "7")
     assert "experiment_0004_job.sh" not in result.stdout
     assert "-J 1-8" in result.stdout
+
+
+def test_the_experiment_asks_for_a_walltime_its_arms_can_use(env) -> None:
+    """An arm is 100,000 URLs — 48 minutes at the measured rate. Asking for
+    the production default of 12 h makes it harder to schedule and more
+    likely to hit the end of the reservation, for nothing."""
+    write_plan(env, tasks=1388)
+    result = run(env, "--dry-run", "experiment")
+    assert "walltime   : 02:00:00" in result.stdout, result.stdout
+
+
+def test_the_dry_run_shows_what_each_arm_will_do(env) -> None:
+    """Four arms are being compared. A rehearsal that does not say what
+    they differ in cannot be checked before two hours are spent."""
+    write_plan(env, tasks=1388)
+    result = run(env, "--dry-run", "experiment")
+    for fragment in ("OD_THREADS=32", "OD_THREADS=128",
+                     "OD_RETRIES=2", "OD_RETRIES=0"):
+        assert fragment in result.stdout, (fragment, result.stdout)
