@@ -107,7 +107,7 @@ disagree.
 
 | Signal | Constant | Threshold | Normal (measured ×2) | Outage (measured) |
 |---|---|---|---:|---:|
-| Local connectivity failures | `MAX_UNREACHABLE_FRACTION` | `0.01` | 0% | 15.5% |
+| Local connectivity failures | `MAX_UNREACHABLE_FRACTION` | `0.1` | 0% at 1–2 nodes, **2.1% at 8** | 15.5% |
 | DNS failures | `MAX_DNS_FRACTION` | `0.2` | 6.0–6.2% | 70.6% |
 | Yield | `MIN_YIELD` | `0.3` | 64–65% | 0.1% |
 
@@ -116,9 +116,32 @@ stopping a healthy task costs one requeue, while continuing through an outage
 costs the run.
 
 `Errno 101 Network is unreachable` is classified separately from other
-failures. A remote host refusing is routine; **this machine having no route
-is never normal**, and in an "other" bucket that sits near 5% it would have
-been invisible at 15.5%.
+failures, because in an "other" bucket sitting near 5% it would have been
+invisible at the outage's 15.5%.
+
+### The unreachable threshold was wrong, and why
+
+It was `0.01`, documented as "normal 0%", on the reasoning that **this
+machine having no route is never normal**. That was measured on one and two
+nodes.
+
+On 2026-08-15 an eight-node wave stored 618,919 images from 1,000,000 URLs
+— a 61.9% yield, squarely normal — and was **rejected** for 2.05%
+unreachable. The step from four nodes to eight multiplies the figure by
+about 15, in both retry settings independently:
+
+| | 4 nodes | 8 nodes | ratio |
+|---|---:|---:|---:|
+| `retries 2` | 0.312% | 4.8% | 15.4× |
+| `retries 0` | 0.135% | 2.05% | 15.2× |
+
+So it is a property of concurrency, not of the network being down.
+
+Two changes follow. The limit is `0.1`, above the 2.1% eight nodes produce
+while healthy and below the outage's 15.5%. And it only rejects when the
+yield is **also** below `HEALTHY_YIELD` (0.50), because an outage cannot
+produce a 62% yield — 2026-07-28 produced 0.1%, which `MIN_YIELD` catches
+on its own.
 
 ## Retry and idempotency
 

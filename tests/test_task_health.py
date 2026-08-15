@@ -38,6 +38,15 @@ def stats(**status) -> dict:
             "status_dict": dict(status)}
 
 
+def make_run(*, candidates: int, successes: int, unreachable: int,
+             dns: int) -> ds.RunSummary:
+    """A run summarised straight from counts, for threshold tests."""
+    other = candidates - successes - unreachable - dns
+    return ds.RunSummary.from_stats(32, 3600.0, [stats(**{
+        "success": successes, UNREACHABLE: unreachable, DNS: dns,
+        TIMEOUT: max(0, other)})])
+
+
 # --------------------------------------------------------------------------
 # The signal that identifies an outage
 # --------------------------------------------------------------------------
@@ -99,13 +108,24 @@ def test_the_outage_profile_is_rejected() -> None:
     assert "unreachable" in health.reason.lower()
 
 
-def test_a_small_amount_of_no_route_still_fails_the_task() -> None:
-    """Held tight on purpose: this is never normal, and detecting it early
-    is what turns a 474-task loss into a one-task loss."""
+def test_a_small_amount_of_no_route_no_longer_fails_a_working_task() -> None:
+    """This test used to assert the opposite, and the belief behind it was
+    wrong.
+
+    It read: "Held tight on purpose: this is never normal, and detecting it
+    early is what turns a 474-task loss into a one-task loss." The premise —
+    that no-route is never normal — came from one- and two-node runs. On
+    2026-08-15 an eight-node wave stored 618,919 images from 1,000,000 URLs,
+    a 61.9% yield, and was rejected for 2.05% unreachable. The step from
+    four nodes to eight multiplies the figure by about 15, in both retry
+    settings independently.
+
+    3% unreachable alongside a 60% yield is a busy network, not an outage.
+    The task below stored 600 of 1,000 and is worth keeping.
+    """
     health = th.assess(summary(**{"success": 600, UNREACHABLE: 30, DNS: 60,
                                   "HTTP Error 404: Not Found": 310}))
-    assert health.healthy is False
-    assert "unreachable" in health.reason.lower()
+    assert health.healthy is True, health.reason
 
 
 def test_a_collapsed_yield_is_rejected_even_without_a_clear_cause() -> None:
@@ -142,3 +162,74 @@ def test_the_reason_names_the_measured_values() -> None:
     health = th.assess(summary(**{DNS: 706, UNREACHABLE: 155, TIMEOUT: 138,
                                   "success": 1}))
     assert "15.5%" in health.reason or "15.50%" in health.reason
+
+
+# ---------------------------------------------------------------------------
+# The threshold's premise was falsified at scale
+# ---------------------------------------------------------------------------
+
+def test_a_healthy_yield_is_not_an_outage_however_unreachable_rises() -> None:
+    """Measured on the cluster, 2026-08-15: an 8-node wave stored 618,919
+    images from 1,000,000 URLs — 61.9%, squarely normal — and was rejected
+    because unreachable was 2.05% against a 1% limit.
+
+    The limit's comment read 'Normal is zero. Nothing routine produces
+    this.' That was measured on one and two nodes. At eight it is 2%, and
+    the same 15x step from four nodes to eight appears in both retry
+    settings, so it is a property of concurrency rather than of the network
+    being down.
+
+    An outage cannot produce a 62% yield. The 2026-07-28 outage produced
+    0.1%, which MIN_YIELD catches on its own.
+    """
+    run = make_run(candidates=1_000_000, successes=618_919,
+                   unreachable=20_478, dns=60_000)
+    verdict = th.assess(run)
+    assert verdict.healthy, verdict.reason
+
+
+def test_the_outage_is_still_caught() -> None:
+    """The profile that cost 474 tasks: 70.6% DNS, 15.5% unreachable, 0.1%
+    success. Relaxing the unreachable rule must not let this through."""
+    run = make_run(candidates=1_000_000, successes=1_000,
+                   unreachable=155_000, dns=706_000)
+    verdict = th.assess(run)
+    assert not verdict.healthy
+    assert verdict.reason is not None
+
+
+def test_unreachable_still_rejects_when_the_yield_is_also_degraded() -> None:
+    """A partial outage: enough gets through to clear the 30% floor, but a
+    fifth of the corpus is being lost to a transient condition and the task
+    is worth retrying rather than accepting."""
+    run = make_run(candidates=1_000_000, successes=400_000,
+                   unreachable=200_000, dns=60_000)
+    verdict = th.assess(run)
+    assert not verdict.healthy
+    assert "unreachable" in (verdict.reason or "")
+
+
+def test_the_reason_no_longer_calls_a_busy_network_an_outage() -> None:
+    """The old message asserted 'This is an outage, not a bad URL list' for
+    a task that stored 618,919 images. Saying so sent the operator looking
+    for a network failure that had not happened."""
+    run = make_run(candidates=1_000_000, successes=400_000,
+                   unreachable=200_000, dns=60_000)
+    assert "outage" not in (th.assess(run).reason or "").lower()
+
+
+def test_the_limit_itself_is_pinned_where_the_gate_cannot_hide_it() -> None:
+    """With a degraded yield the gate does not apply, so the limit alone
+    decides. 5% unreachable passed the old 1% limit's rejection and passes
+    the new 10% one — this is the case that tells them apart."""
+    run = make_run(candidates=1_000_000, successes=400_000,
+                   unreachable=50_000, dns=60_000)
+    assert th.assess(run).healthy, "5% unreachable is under the 10% limit"
+
+
+def test_the_gate_itself_is_pinned_where_the_limit_cannot_hide_it() -> None:
+    """Above the limit but plainly working: only the yield gate can save
+    this, so removing the gate shows up here and nowhere else."""
+    run = make_run(candidates=1_000_000, successes=600_000,
+                   unreachable=150_000, dns=60_000)
+    assert th.assess(run).healthy, "a 60% yield is not an outage"
