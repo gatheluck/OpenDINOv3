@@ -143,6 +143,23 @@ yield is **also** below `HEALTHY_YIELD` (0.50), because an outage cannot
 produce a 62% yield — 2026-07-28 produced 0.1%, which `MIN_YIELD` catches
 on its own.
 
+## Two different limits, and only one of them is 75,000
+
+| limit | value | counts |
+|---|---:|---|
+| array tasks in one job | 75,000 | subjobs in a single `-J` range |
+| **unfinished jobs per user** | **1,000** | **every subjob, queued or running** |
+| running jobs per user | 200 | subjobs actually executing |
+
+Submitting `-J 1-1388%20` was rejected with
+
+    qsub: PTL internal error.
+
+which is not a documented PBS message — an error number qsub could not map
+to text. 1,388 subjobs exceeds the 1,000 unfinished-job limit; the 75,000
+figure is about array tasks and does not help. Submit in ranges of 1,000 or
+fewer, leaving room for anything already queued.
+
 ## Occupying a shared reservation
 
 The reservation is shared with the rest of the team. An uncapped array job

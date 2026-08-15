@@ -158,6 +158,29 @@ ARRAY_RANGE="${OD_ARRAY_RANGE:-}"
 
 # A wave small enough to be harmless needs no cap: it cannot occupy more
 # nodes than it has subjobs.
+# ABCI: "the maximum number of any user's unfinished jobs at the same time"
+# is 1,000, and an array's subjobs count individually against it. The
+# array-task limit of 75,000 is a different, larger limit and does not help.
+#
+# Submitting 1,388 subjobs was rejected with `qsub: PTL internal error`,
+# which is not a documented PBS message — an error number qsub could not map
+# to text. The count is checked here so the next one says what is wrong.
+MAX_UNFINISHED="${OD_MAX_UNFINISHED:-1000}"
+if [ "${COUNT}" -gt "${MAX_UNFINISHED}" ]; then
+  {
+    echo "❌ ${COUNT} subjobs exceeds ABCI's limit of ${MAX_UNFINISHED}"
+    echo "   unfinished jobs per user. An array's subjobs count one each."
+    echo
+    echo "   Submit in ranges of ${MAX_UNFINISHED} or fewer, and leave room"
+    echo "   for anything already queued:"
+    echo
+    echo "     bash scripts/od.sh submit --from ${FROM} --to $((FROM + MAX_UNFINISHED - 100)) --max-concurrent 20"
+    echo
+    echo "   The 75,000 cap is on array TASKS, which is a different limit."
+  } >&2
+  exit 2
+fi
+
 UNCAPPED_LIMIT="${OD_UNCAPPED_LIMIT:-16}"
 if [ -z "${MAX_CONCURRENT}" ] && [ "${COUNT}" -gt "${UNCAPPED_LIMIT}" ]; then
   {
