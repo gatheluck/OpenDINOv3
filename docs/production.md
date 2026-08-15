@@ -143,6 +143,30 @@ yield is **also** below `HEALTHY_YIELD` (0.50), because an outage cannot
 produce a 62% yield — 2026-07-28 produced 0.1%, which `MIN_YIELD` catches
 on its own.
 
+## Occupying a shared reservation
+
+The reservation is shared with the rest of the team. An uncapped array job
+starts subjobs until the scheduler cannot start any more — ABCI's per-user
+limit is 200 running jobs — and colleagues find no nodes.
+
+    bash scripts/od.sh submit --from 20 --to 1387 --max-concurrent 20
+
+PBS renders that as `-J 21-1388%20`, which qsub translates into the
+`max_run_subjobs` attribute. It can be changed after submission:
+
+    qalter -W max_run_subjobs=40 <jobid>[]
+
+**ABCI documents neither the `%` syntax nor `max_run_subjobs`**, in the
+English or the Japanese guide; both list only the per-user limits (200
+running, 1,000 submitted) and the 75,000 cap on array tasks. Whether their
+PBS accepts it is therefore unknown until tried — and trying is free,
+because qsub rejects an unsupported option at submission without taking a
+node. If it is rejected, submit in waves of 16 or fewer instead.
+
+A wave larger than 16 subjobs is refused without a cap, on the same
+reasoning as `OD_BLUR_FACES`: the harm is silent, lands on other people,
+and cannot be given back.
+
 ## Retry and idempotency
 
 - A task with `DONE.json` is skipped. Waves get resubmitted and PBS requeues
