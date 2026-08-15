@@ -273,3 +273,17 @@ def test_arms_reaches_our_own_task_root(env) -> None:
     assert result.returncode == 0, result.stderr
     assert "compare_arms.py" in result.stdout
     assert "/out/datacomp/datacomp_1b/raw_shards" in result.stdout
+
+
+def test_salvage_reaches_the_named_tasks(env) -> None:
+    root = f"{env['OD_OUT_ROOT']}/datacomp/datacomp_1b/raw_shards"
+    result = run(env, "--dry-run", "salvage",
+                 f"{root}/task-000016", f"{root}/task-000017")
+    assert result.returncode == 0, result.stderr
+    assert "salvage_task.py" in result.stdout
+    assert "/out/datacomp/datacomp_1b/raw_shards/task-000016" in result.stdout
+    assert "task-000017" in result.stdout
+
+
+def test_salvage_without_a_task_is_refused(env) -> None:
+    assert run(env, "salvage").returncode != 0

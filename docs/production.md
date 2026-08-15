@@ -107,7 +107,7 @@ disagree.
 
 | Signal | Constant | Threshold | Normal (measured ×2) | Outage (measured) |
 |---|---|---|---:|---:|
-| Local connectivity failures | `MAX_UNREACHABLE_FRACTION` | `0.01` | 0% | 15.5% |
+| Local connectivity failures | `MAX_UNREACHABLE_FRACTION` | `0.1` | 0% at 1–2 nodes, **2.1% at 8** | 15.5% |
 | DNS failures | `MAX_DNS_FRACTION` | `0.2` | 6.0–6.2% | 70.6% |
 | Yield | `MIN_YIELD` | `0.3` | 64–65% | 0.1% |
 
@@ -116,9 +116,56 @@ stopping a healthy task costs one requeue, while continuing through an outage
 costs the run.
 
 `Errno 101 Network is unreachable` is classified separately from other
-failures. A remote host refusing is routine; **this machine having no route
-is never normal**, and in an "other" bucket that sits near 5% it would have
-been invisible at 15.5%.
+failures, because in an "other" bucket sitting near 5% it would have been
+invisible at the outage's 15.5%.
+
+### The unreachable threshold was wrong, and why
+
+It was `0.01`, documented as "normal 0%", on the reasoning that **this
+machine having no route is never normal**. That was measured on one and two
+nodes.
+
+On 2026-08-15 an eight-node wave stored 618,919 images from 1,000,000 URLs
+— a 61.9% yield, squarely normal — and was **rejected** for 2.05%
+unreachable. The step from four nodes to eight multiplies the figure by
+about 15, in both retry settings independently:
+
+| | 4 nodes | 8 nodes | ratio |
+|---|---:|---:|---:|
+| `retries 2` | 0.312% | 4.8% | 15.4× |
+| `retries 0` | 0.135% | 2.05% | 15.2× |
+
+So it is a property of concurrency, not of the network being down.
+
+Two changes follow. The limit is `0.1`, above the 2.1% eight nodes produce
+while healthy and below the outage's 15.5%. And it only rejects when the
+yield is **also** below `HEALTHY_YIELD` (0.50), because an outage cannot
+produce a 62% yield — 2026-07-28 produced 0.1%, which `MIN_YIELD` catches
+on its own.
+
+## Occupying a shared reservation
+
+The reservation is shared with the rest of the team. An uncapped array job
+starts subjobs until the scheduler cannot start any more — ABCI's per-user
+limit is 200 running jobs — and colleagues find no nodes.
+
+    bash scripts/od.sh submit --from 20 --to 1387 --max-concurrent 20
+
+PBS renders that as `-J 21-1388%20`, which qsub translates into the
+`max_run_subjobs` attribute. It can be changed after submission:
+
+    qalter -W max_run_subjobs=40 <jobid>[]
+
+**ABCI documents neither the `%` syntax nor `max_run_subjobs`**, in the
+English or the Japanese guide; both list only the per-user limits (200
+running, 1,000 submitted) and the 75,000 cap on array tasks. Whether their
+PBS accepts it is therefore unknown until tried — and trying is free,
+because qsub rejects an unsupported option at submission without taking a
+node. If it is rejected, submit in waves of 16 or fewer instead.
+
+A wave larger than 16 subjobs is refused without a cap, on the same
+reasoning as `OD_BLUR_FACES`: the harm is silent, lands on other people,
+and cannot be given back.
 
 ## Retry and idempotency
 
