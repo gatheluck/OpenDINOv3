@@ -48,7 +48,8 @@ def jpeg(width: int = 320, height: int = 240) -> bytes:
 
 def make_task(root: Path, task_id: int = 0, *, samples: int = 4,
               candidates: int = 8, broken: int = 0, caption_shift: int = 0,
-              exif: str | None = None, size=(320, 240)) -> Path:
+              exif: str | None = None, size=(320, 240),
+              prefix: str = "caption") -> Path:
     """One finished task, shaped like img2dataset's webdataset output."""
     task = root / f"task-{task_id:06d}"
     shards = task / "shards"
@@ -59,7 +60,7 @@ def make_task(root: Path, task_id: int = 0, *, samples: int = 4,
             key = f"{index:09d}"
             payload = b"not a jpeg" if index < broken else jpeg(*size)
             for suffix, data in ((".jpg", payload),
-                                 (".txt", f"caption {index + caption_shift}"
+                                 (".txt", f"{prefix} {index + caption_shift}"
                                           .encode()),
                                  (".json", json.dumps({"key": key}).encode())):
                 info = tarfile.TarInfo(key + suffix)
@@ -69,7 +70,7 @@ def make_task(root: Path, task_id: int = 0, *, samples: int = 4,
     pq.write_table(pa.table({
         "key": [f"{i:09d}" for i in range(samples)],
         "status": ["success"] * samples,
-        "caption": [f"caption {i}" for i in range(samples)],
+        "caption": [f"{prefix} {i}" for i in range(samples)],
         "width": [size[0]] * samples,
         "height": [size[1]] * samples,
         "original_width": [size[0]] * samples,
@@ -202,3 +203,33 @@ def test_a_healthy_pilot_says_to_continue(tmp_path) -> None:
     result = run(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Widen the wave" in result.stdout
+
+
+def test_captions_are_matched_within_their_own_task(tmp_path) -> None:
+    """Sample keys repeat across tasks.
+
+    Every task starts at shard 00000, so task 0 and task 1 both contain a
+    sample keyed 000000000. Keyed on that alone, the caption lookup is one
+    flat dict and the last task read wins — so on real output it reported
+    300 mismatches out of 400, exactly three of four tasks, and declared a
+    healthy corpus corrupt.
+
+    Each task's captions belong to that task.
+    """
+    # Same keys in every task, different text. A flat dict lets the last
+    # task read win, so the other three compare against its captions.
+    for task_id in (0, 1, 2, 3):
+        make_task(tmp_path, task_id, samples=4, prefix=f"task{task_id}")
+    out = tmp_path / "r.json"
+    result = run(tmp_path, "--json", out)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(out.read_text())["caption_mismatches"] == 0
+
+
+def test_a_real_mismatch_inside_one_task_is_still_caught(tmp_path) -> None:
+    """Scoping per task must not turn the check off."""
+    make_task(tmp_path, 0, samples=4, caption_shift=1)
+    result = run(tmp_path, "--json", tmp_path / "r.json")
+    assert json.loads((tmp_path / "r.json").read_text())[
+        "caption_mismatches"] == 4
+    assert result.returncode != 0
