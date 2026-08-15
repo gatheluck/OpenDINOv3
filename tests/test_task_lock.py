@@ -139,7 +139,10 @@ def test_a_completed_task_is_still_skipped_without_taking_a_lock(workspace
     plan, task_root, meta = workspace
     task_dir = task_root / "task-000000"
     task_dir.mkdir(parents=True)
-    (task_dir / "DONE.json").write_text(json.dumps({"task_id": 0}))
+    # Accounts for the whole task: the runner now checks the marker against
+    # the plan's row count, and one that cannot be verified is redone.
+    (task_dir / "DONE.json").write_text(json.dumps(
+        {"task_id": 0, "candidates": 4, "successes": 4}))
     result = run_task(plan, task_root, meta)
     assert result.returncode == 0
     assert "already complete" in result.stdout

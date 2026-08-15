@@ -440,6 +440,50 @@ def test_a_complete_task_is_still_skipped(workspace) -> None:
     assert "already complete" in again.stdout
 
 
+def test_a_marker_short_of_the_plan_is_redone_even_without_a_flag(workspace
+                                                                  ) -> None:
+    """Tasks 8, 9 and 10 on the cluster carry a DONE.json written before the
+    partial flag existed: 100,000 candidates against a plan that allots them
+    1,000,000. Keyed on the flag, they are skipped forever and 2.7 million
+    URLs stay missing.
+
+    Comparing the recorded candidates against the plan's row count needs no
+    flag and repairs markers written by any earlier version.
+    """
+    plan, task_root = workspace
+    task_dir = task_root / "task-000000"
+    task_dir.mkdir(parents=True)
+    (task_dir / "DONE.json").write_text(json.dumps({
+        "task_id": 0, "candidates": TASK_ROWS // 4, "successes": 2}))
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "already complete" not in result.stdout
+    done = json.loads((task_dir / "DONE.json").read_text())
+    assert done["candidates"] == TASK_ROWS
+
+
+def test_a_marker_matching_the_plan_is_still_skipped(workspace) -> None:
+    """The guard must not have been bought by redoing everything."""
+    plan, task_root = workspace
+    assert run_task(plan, task_root).returncode == 0
+    again = run_task(plan, task_root, attempt="second")
+    assert "already complete" in again.stdout
+
+
+def test_a_marker_that_cannot_be_verified_is_redone(workspace) -> None:
+    """An old marker with no candidates field cannot be checked against the
+    plan. Resumption makes the conservative choice nearly free: the finished
+    shards are kept, nothing is re-downloaded, and the marker is rewritten
+    with the numbers to verify next time."""
+    plan, task_root = workspace
+    assert run_task(plan, task_root).returncode == 0
+    task_dir = task_root / "task-000000"
+    (task_dir / "DONE.json").write_text(json.dumps({"task_id": 0}))
+    again = run_task(plan, task_root, attempt="unverifiable")
+    assert "already complete" not in again.stdout
+    assert json.loads((task_dir / "DONE.json").read_text())["candidates"] \
+        == TASK_ROWS
+
 def test_a_retry_resumes_instead_of_restarting(workspace) -> None:
     """The behaviour this pipeline was missing.
 
