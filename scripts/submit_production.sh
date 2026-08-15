@@ -201,11 +201,18 @@ fi
 # Only the range being submitted. Counting the whole tree reported "3
 # task(s) will be skipped" for a wave that skipped none of them, because
 # the three were outside the range.
+# The same rule the runner applies, from the same script. These were two
+# implementations and they had already drifted: the summary reported
+# "3 complete, will be skipped" for three tasks the runner was about to
+# redo, because it looked for a flag the runner no longer used.
 DONE_ALREADY=0
 for _t in $(seq "${FROM}" "${TO}"); do
   _m=$(printf '%s/task-%06d/DONE.json' "${TASK_ROOT}" "${_t}")
-  [ -f "${_m}" ] && grep -q '"partial": true' "${_m}" 2>/dev/null && continue
-  [ -f "${_m}" ] && DONE_ALREADY=$((DONE_ALREADY + 1))
+  [ -f "${_m}" ] || continue
+  case "$(python3 "${REPO}/scripts/is_task_complete.py" \
+            "${_m}" "${OD_PLAN}" "${_t}" 2>/dev/null)" in
+    skip) DONE_ALREADY=$((DONE_ALREADY + 1)) ;;
+  esac
 done
 
 JOB="${OD_LOGDIR}/production_job.generated.sh"
