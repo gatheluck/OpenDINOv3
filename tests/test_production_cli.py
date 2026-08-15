@@ -295,3 +295,88 @@ def test_a_partial_task_in_range_does_not_count_as_done(tmp_path) -> None:
             {"task_id": task_id, "partial": partial}))
     result = submit(env, "--from", "12", "--to", "19", "--dry-run")
     assert "already done: 1 of 8" in result.stdout, result.stdout
+
+
+def test_a_large_wave_without_a_cap_is_refused(tmp_path) -> None:
+    """The reservation is shared with the team. Uncapped, the scheduler
+    starts subjobs until it cannot start any more — ABCI's per-user limit
+    is 200 running jobs — and colleagues find no nodes. That harm is silent
+    and cannot be given back, so it gets the same no-default treatment as
+    face blurring."""
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", "20", "--to", "1387", "--dry-run")
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "concurrency cap" in combined
+    assert "shared" in combined
+
+
+def test_a_small_wave_needs_no_cap(tmp_path) -> None:
+    """A wave cannot occupy more nodes than it has subjobs, so requiring a
+    cap on eight would be ceremony."""
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", "20", "--to", "27", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_cap_reaches_the_array_range(tmp_path) -> None:
+    """PBS spells it `-J from-to%N`. Dropping the suffix would submit the
+    whole array uncapped while the summary claimed otherwise."""
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", "20", "--to", "1387",
+                    "--max-concurrent", "20", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "-J 21-1388%20" in result.stdout, result.stdout
+
+
+def test_the_cap_is_stated_in_the_summary(tmp_path) -> None:
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", "20", "--to", "1387",
+                    "--max-concurrent", "20", "--dry-run")
+    assert "concurrent : 20 subjob(s)" in result.stdout
+
+
+def test_an_uncapped_small_wave_says_so(tmp_path) -> None:
+    """Silence would read as capped."""
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", "20", "--to", "27", "--dry-run")
+    assert "concurrent : uncapped" in result.stdout
+
+
+def test_the_cap_can_come_from_the_environment(tmp_path) -> None:
+    env = make_env(tmp_path, tasks=1388)
+    env["OD_MAX_CONCURRENT"] = "12"
+    result = submit(env, "--from", "20", "--to", "1387", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "-J 21-1388%12" in result.stdout
+
+
+def test_the_submitter_actually_receives_the_cap(tmp_path) -> None:
+    """Not the dry run: the real path.
+
+    A mutation that dropped the cap from the `exec` line survived every
+    dry-run test, because the dry run never reaches that line. Another that
+    dropped it from the dry-run message survived too, because the summary
+    above it still showed the cap. Only the argv the submitter is handed
+    settles it.
+    """
+    env = make_env(tmp_path, tasks=1388)
+    record = tmp_path / "argv.txt"
+    env["OD_SUBMIT"] = str(SCRIPTS.parent / "tests" / "stubs"
+                           / "record_submit.sh")
+    env["OD_SUBMIT_RECORD"] = str(record)
+    result = submit(env, "--from", "20", "--to", "1387",
+                    "--max-concurrent", "20")
+    assert result.returncode == 0, result.stdout + result.stderr
+    argv = record.read_text().split("\n")
+    assert "21-1388%20" in argv, argv
+
+
+def test_the_dry_run_shows_the_command_it_would_submit(tmp_path) -> None:
+    """The line under 'Would run' is what an operator checks before letting
+    a wave go. It has to carry the cap, not just the summary above it."""
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", "20", "--to", "1387",
+                    "--max-concurrent", "20", "--dry-run")
+    would_run = result.stdout.split("Would run:")[1]
+    assert "-J 21-1388%20" in would_run, would_run

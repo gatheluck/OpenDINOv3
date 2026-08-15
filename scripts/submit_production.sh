@@ -44,6 +44,7 @@ FROM="" ; TO="" ; DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --from)    FROM="$2"; shift 2 ;;
+    --max-concurrent) OD_MAX_CONCURRENT="$2"; shift 2 ;;
     --to)      TO="$2"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     *)         die "unknown option: $1" ;;
@@ -76,6 +77,22 @@ case "${OD_BLUR_FACES}" in
   0|1) ;;
   *) echo "❌ OD_BLUR_FACES must be 0 or 1, got '${OD_BLUR_FACES}'" >&2; exit 2 ;;
 esac
+
+# How many subjobs of this array may run at once.
+#
+# The reservation is SHARED with the rest of the team. Without a cap the
+# scheduler starts subjobs until it cannot start any more, up to ABCI's
+# per-user limit of 200 running jobs, and colleagues find no nodes. That
+# harm is silent and cannot be given back.
+#
+# PBS Pro spells it `-J from-to%N`, which qsub translates into the
+# max_run_subjobs attribute. ABCI documents neither, in the English or the
+# Japanese guide, so whether their PBS accepts it is unknown until tried —
+# and trying is free, because qsub rejects it at submission without taking
+# a node. If it is rejected, submit in waves instead.
+#
+# Adjustable after submission:  qalter -W max_run_subjobs=N <jobid>[]
+MAX_CONCURRENT="${OD_MAX_CONCURRENT:-}"
 
 WALLTIME="${OD_PROD_WALLTIME:-12:00:00}"
 PROCESSES="${OD_PROCESSES:-32}"
@@ -138,6 +155,26 @@ COUNT=$((TO - FROM + 1))
 # offset, so it overrides the range while still range-checking against the
 # plan through --from/--to.
 ARRAY_RANGE="${OD_ARRAY_RANGE:-}"
+
+# A wave small enough to be harmless needs no cap: it cannot occupy more
+# nodes than it has subjobs.
+UNCAPPED_LIMIT="${OD_UNCAPPED_LIMIT:-16}"
+if [ -z "${MAX_CONCURRENT}" ] && [ "${COUNT}" -gt "${UNCAPPED_LIMIT}" ]; then
+  {
+    echo "❌ ${COUNT} subjobs with no concurrency cap."
+    echo
+    echo "   The reservation is shared. Uncapped, the scheduler will start"
+    echo "   as many as it can — up to ABCI's per-user limit of 200 running"
+    echo "   jobs — and the rest of the team finds no nodes."
+    echo
+    echo "     bash scripts/od.sh submit --from N --to M --max-concurrent 20"
+    echo
+    echo "   PBS renders that as -J from-to%20. ABCI does not document the"
+    echo "   syntax, so if qsub rejects it, submit in waves of ${UNCAPPED_LIMIT}"
+    echo "   or fewer instead. A rejection costs nothing: no node is taken."
+  } >&2
+  exit 2
+fi
 # Only the range being submitted. Counting the whole tree reported "3
 # task(s) will be skipped" for a wave that skipped none of them, because
 # the three were outside the range.
@@ -176,9 +213,10 @@ cat <<SUMMARY
 production wave
 
   tasks      : ${FROM}..${TO}  (${COUNT} subjobs, 1 node each)
-  array      : -J ${ARRAY_RANGE:-${J_FROM}-${J_TO}}  (PBS indices; offset
+  array      : -J ${ARRAY_RANGE:-${J_FROM}-${J_TO}}${MAX_CONCURRENT:+%${MAX_CONCURRENT}}  (PBS indices; offset
                ${TASK_ID_OFFSET}, because ABCI refuses index 0)
-  job body   : ${OD_JOB_SCRIPT:-scripts/production_job.sh}$(
+  job body   : ${OD_JOB_SCRIPT:-scripts/production_job.sh}
+  concurrent : ${MAX_CONCURRENT:-uncapped} subjob(s) at once$(
     [ -n "${OD_JOB_SCRIPT:-}" ] && [ -r "${OD_JOB_SCRIPT}" ] && {
       printf '\n\n  arms (from the job body, one per PBS index):'
       sed -n 's/^  \([0-9]\)) export \(.*\) ;;$/\n    \1  \2/p' "${OD_JOB_SCRIPT}"
@@ -203,9 +241,9 @@ SUMMARY
 
 if [ "${DRY_RUN}" -eq 1 ]; then
   echo "dry run — not submitting. Would run:"
-  echo "  ${SUBMIT:-<submitter>} --nodes 1 --walltime ${WALLTIME} ${JOB} -- -J ${ARRAY_RANGE:-${J_FROM}-${J_TO}}"
+  echo "  ${SUBMIT:-<submitter>} --nodes 1 --walltime ${WALLTIME} ${JOB} -- -J ${ARRAY_RANGE:-${J_FROM}-${J_TO}}${MAX_CONCURRENT:+%${MAX_CONCURRENT}}"
   echo
   exit 0
 fi
 
-exec "${SUBMIT}" --nodes 1 --walltime "${WALLTIME}" "${JOB}" -- -J "${ARRAY_RANGE:-${J_FROM}-${J_TO}}"
+exec "${SUBMIT}" --nodes 1 --walltime "${WALLTIME}" "${JOB}" -- -J "${ARRAY_RANGE:-${J_FROM}-${J_TO}}${MAX_CONCURRENT:+%${MAX_CONCURRENT}}"
