@@ -36,6 +36,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   slow --node-hours H  why a wave is slow, and what would fix it
   experiment         run experiment 0004 (4 fetch-setting arms)
   arms               compare the finished arms and choose a setting
+  salvage <task dir>...  mark healthy tasks done without re-downloading
   plan               partition the metadata into tasks, writing plan.json
   assess <task dir>  whether a finished task is worth keeping
   exec <script> ...  any script in scripts/, with the standard binds
@@ -118,6 +119,13 @@ case "${SUBCOMMAND}" in
     run python /work/scripts/inspect_pilot.py \
       "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
       --json "$(in_out "${PRODUCTION}")/pilot_report.json" "$@"
+    ;;
+  salvage)
+    [ $# -ge 1 ] || die "salvage needs at least one task directory"
+    inside=""
+    for target in "$@"; do inside="${inside} $(in_out "${target}")"; done
+    # shellcheck disable=SC2086 -- the paths are container-side and known
+    run python /work/scripts/salvage_task.py ${inside}
     ;;
   arms)
     run python /work/scripts/compare_arms.py \
