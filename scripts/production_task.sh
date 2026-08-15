@@ -104,28 +104,8 @@ echo "started     : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # free: the finished shards are kept, nothing is re-downloaded, and the
 # marker is rewritten with the numbers to verify against next time.
 if [ -f "${TASK_DIR}/DONE.json" ]; then
-  VERDICT=$(python - "${TASK_DIR}/DONE.json" "${OD_PLAN}" "${OD_TASK_ID}" <<'DONECHECK'
-import json, sys
-marker, plan_path, task_id = sys.argv[1], sys.argv[2], int(sys.argv[3])
-try:
-    done = json.load(open(marker))
-    plan = json.load(open(plan_path))
-except Exception:
-    print("redo unverifiable"); raise SystemExit(0)
-# No separate check for the `partial` flag: a capped task always records
-# fewer candidates than the plan allots it, so the comparison below covers
-# it, and a second rule that can never fire on its own is dead code.
-got = done.get("candidates")
-want = next((int(t["rows"]) for t in plan.get("tasks", [])
-             if int(t["task_id"]) == task_id), None)
-if got is None or want is None:
-    print("redo unverifiable")
-elif int(got) < want:
-    print(f"redo short {got} of {want}")
-else:
-    print("skip")
-DONECHECK
-)
+  VERDICT=$(python "${REPO}/scripts/is_task_complete.py" \
+             "${TASK_DIR}/DONE.json" "${OD_PLAN}" "${OD_TASK_ID}")
   case "${VERDICT}" in
     skip)
       echo "already complete; nothing to do"

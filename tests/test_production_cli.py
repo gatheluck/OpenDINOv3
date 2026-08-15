@@ -283,19 +283,24 @@ def test_only_the_submitted_range_is_counted_as_already_done(tmp_path
     assert "already done: 0 of 8" in result.stdout, result.stdout
 
 
-def test_a_partial_task_in_range_does_not_count_as_done(tmp_path) -> None:
-    """A capped task will be redone, so counting it as skipped would
-    understate the wave."""
+def test_a_marker_short_of_the_plan_does_not_count_as_done(tmp_path) -> None:
+    """The summary and the runner apply the same rule, from the same script.
+    They used to have separate implementations and had already drifted: the
+    summary looked for a `partial` flag the runner no longer used, and
+    reported three tasks as complete that the runner was about to redo.
+
+    make_env's plan allots one row per task, so a marker recording one
+    candidate covers it and one recording none does not.
+    """
     env = make_env(tmp_path, tasks=1388)
     root = Path(env["OD_TASK_ROOT"])
-    for task_id, partial in ((12, True), (13, False)):
+    for task_id, candidates in ((12, 0), (13, 1)):
         marker = root / f"task-{task_id:06d}"
         marker.mkdir(parents=True)
         (marker / "DONE.json").write_text(json.dumps(
-            {"task_id": task_id, "partial": partial}))
+            {"task_id": task_id, "candidates": candidates}))
     result = submit(env, "--from", "12", "--to", "19", "--dry-run")
     assert "already done: 1 of 8" in result.stdout, result.stdout
-
 
 def test_a_large_wave_without_a_cap_is_refused(tmp_path) -> None:
     """The reservation is shared with the team. Uncapped, the scheduler
