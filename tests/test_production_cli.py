@@ -380,3 +380,19 @@ def test_the_dry_run_shows_the_command_it_would_submit(tmp_path) -> None:
                     "--max-concurrent", "20", "--dry-run")
     would_run = result.stdout.split("Would run:")[1]
     assert "-J 21-1388%20" in would_run, would_run
+
+def test_the_assessment_ignores_a_set_aside_attempt(tmp_path) -> None:
+    """A retry keeps the previous attempt's empty shards as evidence, in
+    `attempt-<tag>/` inside the task directory. Judging the task on those
+    as well would count data it deliberately discarded and reject a healthy
+    retry — which is what a recursive glob did."""
+    task_dir = tmp_path / "task-000000"
+    write_shards(task_dir, 4, **{"success": 650})
+    aside = task_dir / "attempt-old"
+    aside.mkdir()
+    (aside / "00099_stats.json").write_text(json.dumps({
+        "count": 10_000, "successes": 0,
+        "status_dict": {"<urlopen error [Errno 101] Network is unreachable>":
+                        10_000}}))
+    result = run(ASSESS, task_dir)
+    assert result.returncode == 0, result.stdout + result.stderr

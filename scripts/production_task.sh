@@ -105,23 +105,73 @@ if [ -f "${TASK_DIR}/DONE.json" ]; then
   fi
 fi
 
-# --- a previous attempt left something behind --------------------------------
-# img2dataset's incremental mode skips any shard that already has output, and
-# a failed attempt leaves _stats.json files even when it stored nothing. Left
-# in place, the retry would skip everything and produce the same empty task.
-# Set aside rather than deleted: a failed attempt is evidence.
-if [ -e "${TASK_DIR}" ]; then
-  SET_ASIDE="${TASK_DIR}.attempt-${ATTEMPT_TAG//\//_}"
-  n=1
-  while [ -e "${SET_ASIDE}" ]; do
-    SET_ASIDE="${TASK_DIR}.attempt-${ATTEMPT_TAG//\//_}-${n}"; n=$((n + 1))
-  done
-  echo "⚠️  a previous attempt is present; moving it to ${SET_ASIDE##*/}"
-  mv "${TASK_DIR}" "${SET_ASIDE}" || {
-    echo "❌ cannot set aside the previous attempt" >&2; exit 1; }
-fi
+# --- claim the task ----------------------------------------------------------
+# Without this, correctness depended on the operator remembering which
+# ranges were still in flight. Two subjobs on the same task would each treat
+# the other's live output as wreckage and write to the same directory.
+#
+# `mkdir` is atomic on POSIX and on GPFS, so it is the claim. A lock whose
+# owner died — ABCI stops, a node is lost — goes stale and is taken over,
+# or the task would be stranded forever.
+#
+# With this, `--from 0 --to 1387` is always the right command: finished
+# tasks skip, live ones are left alone, everything else resumes.
+LOCK="${TASK_DIR}/RUNNING.lock"
+STALE_AFTER="${OD_LOCK_STALE_SECONDS:-1800}"
 
 mkdir -p "${TASK_DIR}" || { echo "❌ cannot create ${TASK_DIR}" >&2; exit 1; }
+
+if ! mkdir "${LOCK}" 2>/dev/null; then
+  age=$(python - "${LOCK}" <<'AGE'
+import os, sys, time
+try:
+    print(int(time.time() - os.path.getmtime(sys.argv[1])))
+except OSError:
+    print(-1)
+AGE
+)
+  if [ "${age}" -ge 0 ] && [ "${age}" -lt "${STALE_AFTER}" ]; then
+    echo "another subjob owns task ${OD_TASK_ID}; leaving it alone"
+    [ -f "${LOCK}/owner" ] && sed "s/^/   /" "${LOCK}/owner"
+    echo "   claimed ${age}s ago; considered stale after ${STALE_AFTER}s"
+    exit 0
+  fi
+  echo "⚠️  stale lock (${age}s old, limit ${STALE_AFTER}s); taking over"
+  rm -rf "${LOCK}" && mkdir "${LOCK}" || {
+    echo "❌ cannot take over the lock" >&2; exit 1; }
+fi
+
+printf '{"job": "%s", "host": "%s", "pid": %s}\n' \
+  "${PBS_JOBID:-manual}" "$(hostname)" "$$" > "${LOCK}/owner"
+
+# Released however this exits, or the task is stranded until it goes stale.
+cleanup_lock() { rm -rf "${LOCK}"; }
+trap cleanup_lock EXIT INT TERM
+
+# A long task must keep its claim fresh, or a later wave would judge it
+# stale and start a second copy.
+# stdout and stderr are detached: a background child holding the pipe open
+# makes any caller that captures output wait for it, which hung the tests.
+( while [ -d "${LOCK}" ]; do sleep 60; touch "${LOCK}" 2>/dev/null; done ) \
+  >/dev/null 2>&1 &
+HEARTBEAT=$!
+trap 'kill ${HEARTBEAT} 2>/dev/null; cleanup_lock' EXIT INT TERM
+
+# --- resume a previous attempt -----------------------------------------------
+# This used to move the WHOLE directory aside, so a task killed at the
+# walltime with 90 of 100 shards finished re-downloaded all 100 — while
+# passing --incremental_mode incremental, which exists to prevent exactly
+# that. The flag reads `NNNNN_stats.json`, and the wholesale move deleted
+# the state it reads.
+#
+# Only the finished-but-empty shards have to go, or the 2026-07-28 outage's
+# 100 zero-yield shards per task would be inherited and skipped. A shard
+# killed mid-write has no `_stats.json` and is already not counted.
+if [ -e "${TASK_DIR}" ]; then
+  python "${REPO}/scripts/prepare_retry.py" "${TASK_DIR}" \
+    --tag "${ATTEMPT_TAG//\//_}" || {
+      echo "❌ cannot prepare the previous attempt for retry" >&2; exit 1; }
+fi
 
 # --- the URL list ------------------------------------------------------------
 echo "──────────────────────────────────────────────────────────"
