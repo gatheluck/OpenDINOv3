@@ -304,7 +304,7 @@ def test_a_large_wave_without_a_cap_is_refused(tmp_path) -> None:
     and cannot be given back, so it gets the same no-default treatment as
     face blurring."""
     env = make_env(tmp_path, tasks=1388)
-    result = submit(env, "--from", "20", "--to", "1387", "--dry-run")
+    result = submit(env, "--from", "20", "--to", "919", "--dry-run")
     assert result.returncode != 0
     combined = result.stdout + result.stderr
     assert "concurrency cap" in combined
@@ -323,15 +323,15 @@ def test_the_cap_reaches_the_array_range(tmp_path) -> None:
     """PBS spells it `-J from-to%N`. Dropping the suffix would submit the
     whole array uncapped while the summary claimed otherwise."""
     env = make_env(tmp_path, tasks=1388)
-    result = submit(env, "--from", "20", "--to", "1387",
+    result = submit(env, "--from", "20", "--to", "919",
                     "--max-concurrent", "20", "--dry-run")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "-J 21-1388%20" in result.stdout, result.stdout
+    assert "-J 21-920%20" in result.stdout, result.stdout
 
 
 def test_the_cap_is_stated_in_the_summary(tmp_path) -> None:
     env = make_env(tmp_path, tasks=1388)
-    result = submit(env, "--from", "20", "--to", "1387",
+    result = submit(env, "--from", "20", "--to", "919",
                     "--max-concurrent", "20", "--dry-run")
     assert "concurrent : 20 subjob(s)" in result.stdout
 
@@ -346,9 +346,9 @@ def test_an_uncapped_small_wave_says_so(tmp_path) -> None:
 def test_the_cap_can_come_from_the_environment(tmp_path) -> None:
     env = make_env(tmp_path, tasks=1388)
     env["OD_MAX_CONCURRENT"] = "12"
-    result = submit(env, "--from", "20", "--to", "1387", "--dry-run")
+    result = submit(env, "--from", "20", "--to", "919", "--dry-run")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "-J 21-1388%12" in result.stdout
+    assert "-J 21-920%12" in result.stdout
 
 
 def test_the_submitter_actually_receives_the_cap(tmp_path) -> None:
@@ -365,21 +365,21 @@ def test_the_submitter_actually_receives_the_cap(tmp_path) -> None:
     env["OD_SUBMIT"] = str(SCRIPTS.parent / "tests" / "stubs"
                            / "record_submit.sh")
     env["OD_SUBMIT_RECORD"] = str(record)
-    result = submit(env, "--from", "20", "--to", "1387",
+    result = submit(env, "--from", "20", "--to", "919",
                     "--max-concurrent", "20")
     assert result.returncode == 0, result.stdout + result.stderr
     argv = record.read_text().split("\n")
-    assert "21-1388%20" in argv, argv
+    assert "21-920%20" in argv, argv
 
 
 def test_the_dry_run_shows_the_command_it_would_submit(tmp_path) -> None:
     """The line under 'Would run' is what an operator checks before letting
     a wave go. It has to carry the cap, not just the summary above it."""
     env = make_env(tmp_path, tasks=1388)
-    result = submit(env, "--from", "20", "--to", "1387",
+    result = submit(env, "--from", "20", "--to", "919",
                     "--max-concurrent", "20", "--dry-run")
     would_run = result.stdout.split("Would run:")[1]
-    assert "-J 21-1388%20" in would_run, would_run
+    assert "-J 21-920%20" in would_run, would_run
 
 def test_the_assessment_ignores_a_set_aside_attempt(tmp_path) -> None:
     """A retry keeps the previous attempt's empty shards as evidence, in
@@ -396,3 +396,34 @@ def test_the_assessment_ignores_a_set_aside_attempt(tmp_path) -> None:
                         10_000}}))
     result = run(ASSESS, task_dir)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_an_array_beyond_the_unfinished_job_limit_is_refused(tmp_path
+                                                             ) -> None:
+    """ABCI allows 1,000 unfinished jobs per user and an array's subjobs
+    count one each. Submitting 1,388 was rejected with `qsub: PTL internal
+    error` — not a documented PBS message, so an error number qsub could
+    not map to text. Checked here so the next one says what is wrong."""
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", "0", "--to", "1387",
+                    "--max-concurrent", "20", "--dry-run")
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "1000" in combined
+    assert "unfinished" in combined
+
+
+def test_an_array_within_the_limit_is_accepted(tmp_path) -> None:
+    env = make_env(tmp_path, tasks=1388)
+    result = submit(env, "--from", "0", "--to", "899",
+                    "--max-concurrent", "20", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_limit_is_on_subjobs_not_on_the_concurrency_cap(tmp_path
+                                                            ) -> None:
+    """A cap of 20 does not make 1,388 subjobs acceptable: they are all
+    queued, and queued counts as unfinished."""
+    env = make_env(tmp_path, tasks=1388)
+    assert submit(env, "--from", "0", "--to", "1387",
+                  "--max-concurrent", "1", "--dry-run").returncode != 0
