@@ -30,7 +30,11 @@ from opendinov3.core.download_stats import RunSummary  # noqa: E402
 
 def load_stats(task_dir: Path) -> list[dict]:
     found = []
-    for path in sorted(task_dir.rglob("*_stats.json")):
+    # `shards/` only, not rglob. A retry sets aside the previous attempt's
+    # empty shards into `attempt-<tag>/` INSIDE the task directory, as
+    # evidence; counting them would drag the yield down with data the task
+    # deliberately discarded, and reject a healthy retry.
+    for path in sorted((task_dir / "shards").glob("*_stats.json")):
         try:
             found.append(json.loads(path.read_text()))
         except (OSError, json.JSONDecodeError) as exc:

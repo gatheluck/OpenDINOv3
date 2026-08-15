@@ -175,9 +175,12 @@ def test_a_failed_attempt_is_set_aside_rather_than_added_to(workspace) -> None:
 
     result = run_task(plan, task_root, attempt="retry")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "moving it to" in result.stdout
+    # It used to move the whole directory. Now only the empty shard goes,
+    # so a killed task keeps the shards it did finish.
+    assert "setting aside" in result.stdout
 
-    assert list(task_root.glob("task-000000.attempt-*")), "wreckage was lost"
+    assert list((task_root / "task-000000").glob("attempt-*")), \
+        "the empty shard was lost instead of set aside as evidence"
     done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
     assert done["successes"] == TASK_ROWS, "the retry inherited the empty shard"
 
@@ -435,3 +438,51 @@ def test_a_complete_task_is_still_skipped(workspace) -> None:
     assert run_task(plan, task_root).returncode == 0
     again = run_task(plan, task_root, attempt="retry")
     assert "already complete" in again.stdout
+
+
+def test_a_retry_resumes_instead_of_restarting(workspace) -> None:
+    """The behaviour this pipeline was missing.
+
+    A task killed at the walltime with most shards finished used to
+    re-download all of them, because the runner moved the whole directory
+    aside before every retry — while passing --incremental_mode
+    incremental, whose entire job is to skip finished shards.
+
+    Here the first two shards are already present and healthy. The retry
+    must leave them alone and fetch only the rest.
+    """
+    import shutil
+    plan, task_root = workspace
+    assert run_task(plan, task_root).returncode == 0
+    finished = task_root / "task-000000"
+    keep = {p.name: p.read_bytes()
+            for p in (finished / "shards").glob("00000*")}
+    assert keep, "the fixture produced no first shard"
+
+    # Undo completion, leaving the shards in place as a kill would.
+    (finished / "DONE.json").unlink()
+
+    again = run_task(plan, task_root, attempt="resumed")
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "keeping" in again.stdout, again.stdout
+    for name, before in keep.items():
+        after = (finished / "shards" / name)
+        assert after.is_file(), f"{name} was re-downloaded, not kept"
+        assert after.read_bytes() == before, f"{name} was rewritten"
+
+
+def test_a_retry_after_an_outage_does_not_inherit_the_empty_shards(workspace
+                                                                   ) -> None:
+    """The hazard the wholesale move was protecting against, kept."""
+    plan, task_root = workspace
+    shards = task_root / "task-000000" / "shards"
+    shards.mkdir(parents=True)
+    (shards / "00000.tar").write_bytes(b"empty")
+    (shards / "00000_stats.json").write_text(json.dumps({
+        "count": 4, "successes": 0,
+        "status_dict": {"<urlopen error [Errno 101] Network is unreachable>": 4},
+    }))
+    result = run_task(plan, task_root, attempt="after-outage")
+    assert result.returncode == 0, result.stdout + result.stderr
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["successes"] == TASK_ROWS, "the empty shard was inherited"
