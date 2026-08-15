@@ -131,7 +131,13 @@ def main() -> int:
                 sizes.extend(zip(table.column("original_width").to_pylist(),
                                  table.column("original_height").to_pylist()))
             if "caption" in names and "key" in names:
-                captions.update(zip(table.column("key").to_pylist(),
+                # Keyed by (task, key). Every task starts at shard 00000, so
+                # sample keys repeat across tasks; one flat dict let the last
+                # task read win and reported 300 mismatches in 400 — three of
+                # four tasks — on output that was fine.
+                captions.update(
+                    ((task.name, k), v)
+                    for k, v in zip(table.column("key").to_pylist(),
                                     table.column("caption").to_pylist()))
 
     if empty_tasks:
@@ -159,7 +165,7 @@ def main() -> int:
                 except Exception:
                     decode_failures += 1
                     continue
-                expected = captions.get(key)
+                expected = captions.get((task.name, key))
                 if expected is not None and expected != text:
                     caption_mismatches += 1
 
