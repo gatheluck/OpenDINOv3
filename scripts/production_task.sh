@@ -96,13 +96,43 @@ echo "started     : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # it. Experiment 0004 left three such tasks marked complete, which would
 # have silently dropped 2.7 million URLs from the corpus. The marker records
 # what it is, and a partial one does not count as done.
+# Checked against the PLAN, not against a flag. Tasks 8-10 carry markers
+# written before the flag existed — 100,000 candidates against a plan that
+# allots them 1,000,000 — and a flag-based check skips them forever.
+#
+# A marker that cannot be verified is redone. Resumption makes that nearly
+# free: the finished shards are kept, nothing is re-downloaded, and the
+# marker is rewritten with the numbers to verify against next time.
 if [ -f "${TASK_DIR}/DONE.json" ]; then
-  if grep -q '"partial": true' "${TASK_DIR}/DONE.json" 2>/dev/null; then
-    echo "⚠️  previously completed with a capped manifest; redoing in full"
-  else
-    echo "already complete; nothing to do"
-    exit 0
-  fi
+  VERDICT=$(python - "${TASK_DIR}/DONE.json" "${OD_PLAN}" "${OD_TASK_ID}" <<'DONECHECK'
+import json, sys
+marker, plan_path, task_id = sys.argv[1], sys.argv[2], int(sys.argv[3])
+try:
+    done = json.load(open(marker))
+    plan = json.load(open(plan_path))
+except Exception:
+    print("redo unverifiable"); raise SystemExit(0)
+# No separate check for the `partial` flag: a capped task always records
+# fewer candidates than the plan allots it, so the comparison below covers
+# it, and a second rule that can never fire on its own is dead code.
+got = done.get("candidates")
+want = next((int(t["rows"]) for t in plan.get("tasks", [])
+             if int(t["task_id"]) == task_id), None)
+if got is None or want is None:
+    print("redo unverifiable")
+elif int(got) < want:
+    print(f"redo short {got} of {want}")
+else:
+    print("skip")
+DONECHECK
+)
+  case "${VERDICT}" in
+    skip)
+      echo "already complete; nothing to do"
+      exit 0 ;;
+    *)
+      echo "⚠️  the marker does not account for the whole task (${VERDICT#redo }); redoing" ;;
+  esac
 fi
 
 # --- claim the task ----------------------------------------------------------
