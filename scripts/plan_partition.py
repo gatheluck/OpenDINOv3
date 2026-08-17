@@ -30,23 +30,37 @@ import pyarrow.parquet as pq  # noqa: E402
 
 from opendinov3.core import metadata_partition as mp  # noqa: E402
 
-#: successes/sec/node at 32 processes.
+#: successes/sec/node at 32 processes, retries 0.
 #:
-#: HISTORICAL: 186.7 and 179.0, measured on the predecessor's runs.
-#: CONTRADICTED 2026-08-14: the first production wave measured 22.5
-#: URLs/sec/node, i.e. ~14.6 successes/sec — 12x below this. Every subjob
-#: was busy (open tars minus finished shards was exactly processes x nodes),
-#: so the cause is time per URL, not concurrency.
+#: MEASURED 2026-08-15, experiment 0004 arm 10, on a full 100,000-URL slice:
+#: 348.4 URLs/sec at 64.7% yield = 225.3 stored/sec. Four arms were compared
+#: on equal slices and this one won on images stored per node-hour, not on
+#: speed — see scripts/compare_arms.py.
 #:
-#: The historical figure is kept only so the gap stays visible. Every
-#: estimate printed below is therefore OPTIMISTIC BY ABOUT 12x until this is
-#: replaced with a figure measured on a current wave. Do not size a walltime
-#: from it. See scripts/diagnose_throughput.py.
-SUCC_PER_SEC = 180.0
-SUCC_PER_SEC_IS_MEASURED_ON_A_CURRENT_WAVE = False
-YIELD = 0.65
-#: Whole-corpus figure: 82,262,338 images in 2.11 TB.
-KB_PER_IMAGE = 25.1
+#: Superseded figures, kept so the gap stays legible:
+#:   180.0  the predecessor's runs, retries 2. Never reproduced.
+#:    14.6  2026-08-14, first production wave, retries 2, 8 nodes. Computed
+#:          from completed shards only, so it undercounts work in flight.
+#:
+#: Measured at roughly four concurrent nodes. Eight nodes have run but their
+#: wall time was not recorded — the tasks were rejected by a threshold since
+#: corrected — so scaling beyond four is still extrapolation.
+SUCC_PER_SEC = 225.3
+SUCC_PER_SEC_IS_MEASURED_ON_A_CURRENT_WAVE = True
+#: MEASURED 2026-08-15 across our own output, which varies by URL slice:
+#: 55.0% over four tasks, 61.9% and 62.2% on two more, 64.7% on the
+#: experiment arm. The low end is used, because a plan that assumes the
+#: best slice under-counts the node-hours.
+YIELD = 0.55
+#: MEASURED 2026-08-15 on OUR OWN output: 692,851 images at 85.6 KB.
+#:
+#: The old figure, 25.1, came from the predecessor's tree (82,262,338 images
+#: in 2.11 TB) whose pipeline settings were never verified. Ours stores at
+#: original resolution (--resize_mode no); theirs may not have. It
+#: under-predicted storage by 2.6x — 23.2 TB against 60.8 TB — which is the
+#: cost of taking a number from someone else's output without checking how
+#: it was produced.
+KB_PER_IMAGE = 85.6
 
 
 def read_sources(meta_dir: Path) -> list[mp.SourceFile]:
@@ -103,9 +117,7 @@ def main() -> int:
 
     print(f"at {YIELD:.0%} yield and {SUCC_PER_SEC:.0f} successes/sec per node:")
     if not SUCC_PER_SEC_IS_MEASURED_ON_A_CURRENT_WAVE:
-        print("  ⚠️  that rate is HISTORICAL and has been contradicted: the")
-        print("      2026-08-14 wave measured ~14.6/sec, 12x lower. Every")
-        print("      figure below is optimistic by about that factor.")
+        print("  ⚠️  that rate is not measured on a current wave.")
     print(f"  images     : {images/1e6:,.0f} million")
     print(f"  storage    : {terabytes:.1f} TB (at {KB_PER_IMAGE} KB/image)")
     print(f"  node-hours : {hours:,.0f}")
@@ -117,8 +129,9 @@ def main() -> int:
         efficiency = 1.0 if nodes == 1 else 0.97
         print(f"{nodes:>7} {hours / nodes / efficiency / 24:>7.1f}")
     print()
-    print("Only 1 and 2 nodes have been measured (experiment 0003). Anything "
-          "above is extrapolation; ramp up and watch yield.")
+    print("Measured at about four concurrent nodes (experiment 0004). Eight "
+          "have run but\ntheir wall time was not recorded, so anything above "
+          "four is extrapolation.")
 
     if args.json:
         args.json.write_text(json.dumps({
