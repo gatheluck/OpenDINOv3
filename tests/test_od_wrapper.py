@@ -357,3 +357,72 @@ def test_shards_we_produced_can_be_verified_against_the_baseline(env) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "/out/relaion5b_research_safe/raw_shards" in result.stdout
     assert f"/corpus{shards}" not in result.stdout, result.stdout
+
+
+# --------------------------------------------------------------------------
+# The output side has the same two edges
+#
+# `in_corpus` was fixed to pick its mount by containment and to refuse a path
+# under neither bind. `in_out` kept prepending /out by plain string prefix,
+# so the identical pair of bugs stayed live on every output path: a directory
+# that only spells like the root is accepted, and one under neither is
+# mapped to a guess.
+#
+# One resolver for both, so a fix to the rule cannot reach half the callers.
+# --------------------------------------------------------------------------
+
+def test_a_task_root_in_the_predecessors_tree_is_read_from_there(env) -> None:
+    """Reporting on the predecessor's shards is a legitimate thing to ask.
+
+    `in_out` mapped it to /out<absolute path>, which is nowhere. The tree is
+    bound read-only at /corpus and reading it is all `report` does.
+    """
+    shards = Path(env["OD_ROOT"]) / "datacomp" / "datacomp_1b" / "raw_shards"
+    shards.mkdir(parents=True)
+    result = run({**env, "OD_TASK_ROOT": str(shards)}, "--dry-run", "report")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "/corpus/datacomp/datacomp_1b/raw_shards" in result.stdout
+    assert f"/out{shards}" not in result.stdout, result.stdout
+
+
+def test_a_salvage_target_that_only_spells_like_the_root_is_refused(env,
+                                                                    tmp_path
+                                                                    ) -> None:
+    """`<out>-backup/task-000000` is not in `<out>`, and salvage writes.
+
+    Marking a task done is not reversible from inside the container, so the
+    directory it lands in has to be the one that was named.
+    """
+    stray = tmp_path / "out-backup" / "task-000000"
+    stray.mkdir(parents=True)
+    result = run(env, "--dry-run", "salvage", str(stray))
+
+    assert result.returncode != 0, result.stdout
+    assert "is not inside any bind" in result.stderr, result.stderr
+
+
+def test_an_out_of_bounds_production_dir_does_not_truncate_the_json_path(
+        env, tmp_path) -> None:
+    """The failure mode that makes an unchecked resolver worse than none.
+
+    These paths are built as `$(resolve "$dir")/plan.json`. `die` inside
+    $(...) exits only the subshell, so an unchecked call substitutes an
+    empty string and the run goes ahead writing to `/plan.json` — inside the
+    container, on a layer that is discarded when it exits.
+    """
+    outside = tmp_path / "elsewhere" / "production"
+    outside.mkdir(parents=True)
+    result = run({**env, "OD_PRODUCTION": str(outside)}, "--dry-run", "plan")
+
+    assert result.returncode != 0, result.stdout
+    assert " /plan.json" not in result.stdout, result.stdout
+
+
+def test_assessing_a_task_outside_both_binds_is_refused(env, tmp_path) -> None:
+    stray = tmp_path / "elsewhere" / "task-000000"
+    stray.mkdir(parents=True)
+    result = run(env, "--dry-run", "assess", str(stray))
+
+    assert result.returncode != 0, result.stdout
+    assert "is not inside any bind" in result.stderr, result.stderr
