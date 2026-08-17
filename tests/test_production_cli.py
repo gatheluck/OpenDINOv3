@@ -432,3 +432,103 @@ def test_the_limit_is_on_subjobs_not_on_the_concurrency_cap(tmp_path
     env = make_env(tmp_path, tasks=1388)
     assert submit(env, "--from", "0", "--to", "1387",
                   "--max-concurrent", "1", "--dry-run").returncode != 0
+
+
+# --------------------------------------------------------------------------
+# The task root has to belong to the plan's corpus
+#
+# OD_TASK_ROOT defaults to DataComp's shard tree, because DataComp is the
+# campaign in flight. Left to default for a second corpus, that wave writes
+# into DataComp's tree, where the task numbers collide — and the collision
+# is silent rather than noisy.
+#
+# is_task_complete compares the marker's `candidates` against the plan's
+# `rows`. Both corpora are planned at 1,000,000 URLs per task, so a finished
+# DataComp task-000000 answers `skip` for the other corpus's task 0 as well.
+# Every already-done task would be skipped and the wave would report success
+# having downloaded nothing of the corpus it was asked for.
+# --------------------------------------------------------------------------
+
+def datacomp_env(tmp_path, **over):
+    """make_env, but with a plan whose metadata is DataComp's."""
+    env = make_env(tmp_path, **over)
+    meta = tmp_path / "corpus" / "datacomp" / "datacomp_1b" / "upstream_metadata"
+    meta.mkdir(parents=True)
+    plan = json.loads(Path(env["OD_PLAN"]).read_text())
+    plan["meta_dir"] = str(meta)
+    Path(env["OD_PLAN"]).write_text(json.dumps(plan))
+    env["OD_META_ROOT"] = str(meta)
+    return env
+
+
+def test_another_corpus_may_not_default_into_datacomps_tree(tmp_path) -> None:
+    """The wave is refused at submission, before a node is taken."""
+    env = make_env(tmp_path)          # plan's meta_dir is not DataComp's
+    del env["OD_TASK_ROOT"]
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+
+    assert result.returncode != 0, result.stdout
+    combined = result.stdout + result.stderr
+    assert "OD_TASK_ROOT" in combined, combined
+    assert "qsub" not in combined, combined
+
+
+def test_datacomp_still_defaults_to_its_own_tree(tmp_path) -> None:
+    """The campaign in flight must not need a new variable mid-run."""
+    env = datacomp_env(tmp_path)
+    del env["OD_TASK_ROOT"]
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "datacomp/datacomp_1b/raw_shards" in result.stdout, result.stdout
+
+
+def test_another_corpus_is_accepted_once_it_says_where_to_write(tmp_path
+                                                                ) -> None:
+    env = make_env(tmp_path)
+    env["OD_TASK_ROOT"] = str(tmp_path / "out" / "relaion" / "raw_shards")
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "relaion/raw_shards" in result.stdout, result.stdout
+
+
+def test_the_corpus_is_read_from_the_plan_not_from_the_environment(tmp_path
+                                                                    ) -> None:
+    """OD_META_ROOT can disagree with the plan, and the plan wins.
+
+    od.sh derives OD_META_ROOT from OD_METADATA, which itself defaults to
+    DataComp's. So a Re-LAION plan submitted without OD_METADATA set arrives
+    with OD_META_ROOT naming DataComp. Checking the environment would read
+    that as a DataComp wave and wave the default through — while the subjobs
+    build their manifests from the plan, which is Re-LAION's.
+    """
+    env = make_env(tmp_path)
+    del env["OD_TASK_ROOT"]
+    env["OD_META_ROOT"] = str(
+        tmp_path / "corpus" / "datacomp" / "datacomp_1b" / "upstream_metadata")
+    Path(env["OD_META_ROOT"]).mkdir(parents=True)
+
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+    assert result.returncode != 0, result.stdout
+    assert "OD_TASK_ROOT" in result.stdout + result.stderr
+
+
+def test_a_plan_that_does_not_say_which_corpus_still_defaults(tmp_path
+                                                              ) -> None:
+    """Plans written before `meta_dir` was recorded must keep working.
+
+    The wave in flight was planned by an earlier version. Refusing an
+    unlabelled plan would stop the campaign to guard against a corpus it
+    cannot be; warning is enough, because every newly written plan carries
+    the field and so is checked properly.
+    """
+    env = make_env(tmp_path)
+    del env["OD_TASK_ROOT"]
+    plan = json.loads(Path(env["OD_PLAN"]).read_text())
+    del plan["meta_dir"]
+    Path(env["OD_PLAN"]).write_text(json.dumps(plan))
+
+    result = submit(env, "--from", "0", "--to", "7", "--dry-run")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "datacomp/datacomp_1b/raw_shards" in result.stdout, result.stdout

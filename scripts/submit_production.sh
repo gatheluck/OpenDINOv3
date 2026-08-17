@@ -114,6 +114,38 @@ fi
 TASK_ROOT="${OD_TASK_ROOT:-}"
 if [ -z "${TASK_ROOT}" ]; then
   [ -n "${OD_OUT_ROOT:-}" ] || die "set OD_TASK_ROOT, or OD_OUT_ROOT to derive it"
+  # The default is DataComp's tree, because DataComp is the campaign in
+  # flight. It may only be used for a DataComp plan. Another corpus left to
+  # default would write into that tree, where the task numbers collide, and
+  # the collision is silent: is_task_complete compares the marker's
+  # `candidates` against the plan's `rows`, both corpora are planned at
+  # 1,000,000 URLs per task, so every finished DataComp task answers `skip`
+  # for the other corpus's task of the same number. The wave would report
+  # success having downloaded nothing of the corpus it was asked for.
+  #
+  # Read from the plan rather than from OD_META_ROOT: the plan is what the
+  # subjobs actually build their manifests from, so it is the thing whose
+  # corpus has to match.
+  PLAN_META=$(python3 -c "
+import json, sys
+print(json.load(open('${OD_PLAN}')).get('meta_dir') or '')
+") || die "cannot read ${OD_PLAN}"
+  case "${PLAN_META}" in
+    # Unlabelled: written before the field existed, as the wave in flight
+    # was. Refusing it would stop that campaign to guard against a corpus it
+    # cannot be. Every newly written plan carries the field and is checked.
+    "") echo "⚠️  ${OD_PLAN} does not say which corpus it plans;" >&2
+        echo "   assuming DataComp. Set OD_TASK_ROOT to be sure." >&2 ;;
+    */datacomp/datacomp_1b/*) ;;
+    *) die "this plan is over ${PLAN_META}, which is not DataComp, but
+   OD_TASK_ROOT is unset and would default to DataComp's shard tree.
+   Its finished tasks carry the same numbers and the same 1,000,000
+   candidates, so every one of them would be skipped and the wave would
+   report success having downloaded nothing.
+
+   Set OD_TASK_ROOT to this corpus's own tree, for example:
+     export OD_TASK_ROOT=\"\${OD_OUT_ROOT}/<corpus>/raw_shards\"" ;;
+  esac
   TASK_ROOT="${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards"
 fi
 
