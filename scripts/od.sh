@@ -42,6 +42,10 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   exec <script> ...  any script in scripts/, with the standard binds
 
 Source your environment file first: OD_ROOT and OD_OUT_ROOT must be set.
+
+OD_METADATA picks the corpus to plan from, and may be under either root:
+the predecessor's tree (read-only) or our own output, where a corpus we
+fetched ourselves has to live. OD_TASK_ROOT picks where its shards go.
 USAGE
 }
 
@@ -74,7 +78,46 @@ run() {   # $@: the command inside the container
 }
 
 # Paths inside the container, derived from the binds above.
-in_corpus() { printf '/corpus%s\n' "${1#${OD_ROOT}}"; }
+#
+# The bind that contains the path decides the mount. A corpus is not always
+# in the predecessor's tree: DataComp's metadata was already on the cluster
+# under OD_ROOT, but Re-LAION's is gated and has to be fetched, and the only
+# place we may write is our own output root.
+#
+# `/corpus` used to be prepended whatever the path was. For metadata under
+# OD_OUT_ROOT that produced /corpus/groups/... — a directory that exists
+# nowhere — and the run went ahead and reported the corpus had no parquet
+# files, which is indistinguishable from an empty corpus.
+under() {   # $1 path, $2 host root, $3 mount point; prints the mapped path
+  local path="$1" root="${2%/}" mount="$3"
+  [ -n "${root}" ] || return 1
+  [ "${path}" = "${root}" ] && { printf '%s\n' "${mount}"; return 0; }
+  # Quoted in the pattern so the match is literal and ends at a separator:
+  # a plain string prefix accepts `<root>-backup/...` and maps it into
+  # /corpus, where it is a different directory that happens to spell alike.
+  case "${path}" in
+    "${root}"/*) printf '%s%s\n' "${mount}" "${path#"${root}"}"; return 0 ;;
+  esac
+  return 1
+}
+
+# Callers must check: `die` inside $(...) exits only the subshell, so an
+# unchecked call would substitute an empty string and run anyway.
+in_container() {
+  # Longest root first, so the more specific bind wins if one root is nested
+  # inside the other.
+  if [ "${#OD_OUT_ROOT}" -gt "${#OD_ROOT}" ]; then
+    under "$1" "${OD_OUT_ROOT}" /out && return 0
+    under "$1" "${OD_ROOT}" /corpus && return 0
+  else
+    under "$1" "${OD_ROOT}" /corpus && return 0
+    under "$1" "${OD_OUT_ROOT}" /out && return 0
+  fi
+  die "${1} is not inside any bind.
+   The container sees only OD_ROOT at /corpus and OD_OUT_ROOT at /out,
+   so there is no path there that would have worked."
+}
+
 in_out()    { printf '/out%s\n'    "${1#${OD_OUT_ROOT}}"; }
 
 # NOT through the container: qsub does not exist inside the image. OD_PLAN
@@ -96,16 +139,19 @@ do_submit() {
 SUBCOMMAND="$1"; shift
 case "${SUBCOMMAND}" in
   inspect)
-    run python /work/scripts/inspect_metadata.py "$(in_corpus "${METADATA}")" "$@"
+    META_IN="$(in_container "${METADATA}")" || exit 1
+    run python /work/scripts/inspect_metadata.py "${META_IN}" "$@"
     ;;
   resolution)
-    run python /work/scripts/measure_resolution.py "$(in_corpus "${METADATA}")" \
+    META_IN="$(in_container "${METADATA}")" || exit 1
+    run python /work/scripts/measure_resolution.py "${META_IN}" \
       --files "${OD_SAMPLE_FILES:-40}" \
       --json "$(in_out "${PRODUCTION}")/resolution.json" "$@"
     ;;
   verify)
-    run python /work/scripts/verify_recorded_sizes.py \
-      "$(in_corpus "${OD_SHARDS:-${OD_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
+    SHARDS_IN="$(in_container \
+      "${OD_SHARDS:-${OD_ROOT}/datacomp/datacomp_1b/raw_shards}")" || exit 1
+    run python /work/scripts/verify_recorded_sizes.py "${SHARDS_IN}" \
       --files "${OD_SAMPLE_FILES:-40}" \
       --baseline "$(in_out "${PRODUCTION}")/resolution.json" \
       --json "$(in_out "${PRODUCTION}")/verify_sizes.json" "$@"
@@ -154,7 +200,8 @@ case "${SUBCOMMAND}" in
     do_submit "$@"
     ;;
   plan)
-    run python /work/scripts/plan_partition.py "$(in_corpus "${METADATA}")" \
+    META_IN="$(in_container "${METADATA}")" || exit 1
+    run python /work/scripts/plan_partition.py "${META_IN}" \
       --urls-per-task "${OD_URLS_PER_TASK:-1000000}" \
       --json "$(in_out "${PRODUCTION}")/plan.json" "$@"
     ;;
