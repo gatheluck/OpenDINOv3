@@ -530,3 +530,185 @@ def test_a_retry_after_an_outage_does_not_inherit_the_empty_shards(workspace
     assert result.returncode == 0, result.stdout + result.stderr
     done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
     assert done["successes"] == TASK_ROWS, "the empty shard was inherited"
+
+
+# --------------------------------------------------------------------------
+# A corpus that is not DataComp
+#
+# dataset_schema and task_manifest are tested against COYO's spellings, but
+# only as units. The runner was written against DataComp and names `url`,
+# `text`, `uid` and `face_bboxes` directly, on the strength of the manifest
+# renaming every corpus to those. That renaming is the seam, and COYO is the
+# next corpus in scope, so it is driven here rather than assumed.
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def coyo_workspace(server, tmp_path):
+    """A plan over a COYO-shaped source: `id`, no boxes, a face *count*."""
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    source = meta / "a.parquet"
+    pq.write_table(pa.table({
+        "id": [i for i in range(IMAGES)],
+        "url": [f"{server}/{i:04d}.jpg" for i in range(IMAGES)],
+        "text": [f"caption {i}" for i in range(IMAGES)],
+        "width": [64 for _ in range(IMAGES)],
+        "height": [64 for _ in range(IMAGES)],
+        # A count, not boxes. It must not be mistaken for something blurrable
+        # and must not be carried as if it were.
+        "num_faces": [2 for _ in range(IMAGES)],
+        # COYO ships scores; they inflate the manifest and are recoverable
+        # upstream by identifier, so they must be left behind.
+        "clip_similarity_vitb32": [0.3 for _ in range(IMAGES)],
+    }), source)
+
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "urls_per_task": TASK_ROWS,
+        "total_rows": IMAGES,
+        "tasks": [
+            {"task_id": t, "rows": TASK_ROWS,
+             "pieces": [{"path": str(source),
+                         "start": t * TASK_ROWS,
+                         "end": (t + 1) * TASK_ROWS}]}
+            for t in range(IMAGES // TASK_ROWS)
+        ],
+    }))
+    return plan, tmp_path / "tasks"
+
+
+def test_a_coyo_shaped_corpus_runs_end_to_end(coyo_workspace) -> None:
+    """`id` is not `uid` and there are no boxes; the run must still complete.
+
+    Asserted against DONE.json rather than the exit code alone: the runner
+    writes the marker only after the health check accepts the task, so a run
+    that downloaded nothing would not produce one.
+    """
+    plan, task_root = coyo_workspace
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["successes"] == TASK_ROWS, result.stdout + result.stderr
+
+
+def test_coyos_identifier_survives_into_the_shard(coyo_workspace) -> None:
+    """The whole point of the renaming.
+
+    Checked in the shard's parquet, not the log: the "manifest columns" line
+    prints `uid` whether or not img2dataset was ever told to carry it.
+    """
+    plan, task_root = coyo_workspace
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    shard = sorted((task_root / "task-000000" / "shards").glob("*.parquet"))[0]
+    names = pq.ParquetFile(shard).schema_arrow.names
+    assert "uid" in names, f"COYO's `id` was dropped: {names}"
+    assert "num_faces" not in names, f"a face count was carried: {names}"
+    assert "clip_similarity_vitb32" not in names, names
+
+
+def test_blurring_a_corpus_without_boxes_is_refused(coyo_workspace) -> None:
+    """COYO records how many faces, never where.
+
+    The failure that matters is the quiet one: a wave asked to blur, running
+    to completion, and publishing unblurred faces. It must stop instead, and
+    before spending a node-hour.
+
+    Pinned here rather than once per corpus: the guard keys off the manifest's
+    columns, not off which corpus produced them, so Re-LAION takes this same
+    branch and a second copy would cost a download without adding coverage.
+    """
+    plan, task_root = coyo_workspace
+    result = run_task(plan, task_root, blur="1")
+    assert result.returncode != 0, result.stdout + result.stderr
+
+    combined = result.stdout + result.stderr
+    assert "face_bboxes" in combined, combined
+    assert not (task_root / "task-000000" / "DONE.json").exists()
+
+
+# --------------------------------------------------------------------------
+# Re-LAION — the same seam, with every name in the wrong case
+#
+# LAION spells all five roles differently from DataComp, and its own card
+# warns that naming is not uniform across their repositories. The runner
+# names `url` and `text` lowercase, so the whole corpus rests on the manifest
+# lowercasing them first. Nothing downstream would report the omission: a
+# caption column that was never bound looks exactly like a corpus with no
+# captions.
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def relaion_workspace(server, tmp_path):
+    """A plan over a Re-LAION-shaped source: uppercase names, `hash`, no boxes."""
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    source = meta / "a.parquet"
+    pq.write_table(pa.table({
+        "URL": [f"{server}/{i:04d}.jpg" for i in range(IMAGES)],
+        "TEXT": [f"caption {i}" for i in range(IMAGES)],
+        "WIDTH": [64 for _ in range(IMAGES)],
+        "HEIGHT": [64 for _ in range(IMAGES)],
+        "hash": [f"{i:016x}" for i in range(IMAGES)],
+        "similarity": [0.3 for _ in range(IMAGES)],
+        "punsafe": [0.01 for _ in range(IMAGES)],
+        "pwatermark": [0.02 for _ in range(IMAGES)],
+        "LANGUAGE": ["en" for _ in range(IMAGES)],
+    }), source)
+
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "urls_per_task": TASK_ROWS,
+        "total_rows": IMAGES,
+        "tasks": [
+            {"task_id": t, "rows": TASK_ROWS,
+             "pieces": [{"path": str(source),
+                         "start": t * TASK_ROWS,
+                         "end": (t + 1) * TASK_ROWS}]}
+            for t in range(IMAGES // TASK_ROWS)
+        ],
+    }))
+    return plan, tmp_path / "tasks"
+
+
+def test_a_relaion_shaped_corpus_runs_end_to_end(relaion_workspace) -> None:
+    """`URL` is not `url`. The run must still fetch every image."""
+    plan, task_root = relaion_workspace
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["successes"] == TASK_ROWS, result.stdout + result.stderr
+
+
+def test_relaions_caption_and_identifier_survive_the_case_change(
+        relaion_workspace) -> None:
+    """A dropped caption is invisible downstream, so it is checked here.
+
+    Read from the shard's own parquet: img2dataset writes `caption` only when
+    it was given a caption column, so its presence is evidence the binding
+    happened rather than evidence of what the log claimed. The value is
+    checked too — the column exists and holds null for every row when the
+    binding was made against a name the manifest does not carry.
+    """
+    plan, task_root = relaion_workspace
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    shard = sorted((task_root / "task-000000" / "shards").glob("*.parquet"))[0]
+    table = pq.read_table(shard)
+    names = table.schema.names
+
+    assert "uid" in names, f"Re-LAION's `hash` was dropped: {names}"
+    assert "caption" in names, f"TEXT was never bound as the caption: {names}"
+    assert table.column("caption")[0].as_py().startswith("caption "), (
+        f"the caption column is present but empty: "
+        f"{table.column('caption')[0].as_py()!r}")
+    # Scores and language are recoverable upstream by identifier; carrying
+    # them would inflate every shard for the whole corpus.
+    for dropped in ("similarity", "punsafe", "pwatermark", "LANGUAGE"):
+        assert dropped not in names, f"{dropped} was carried: {names}"
+    # img2dataset writes the real decoded size itself, exactly once.
+    assert names.count("width") == 1, names
