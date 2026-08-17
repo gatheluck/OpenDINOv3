@@ -59,6 +59,9 @@ SIF="${OD_SIF:-${OD_OUT_ROOT}/opendinov3.sif}"
 
 METADATA="${OD_METADATA:-${OD_ROOT}/datacomp/datacomp_1b/upstream_metadata}"
 PRODUCTION="${OD_PRODUCTION:-${OD_OUT_ROOT}/production}"
+# Named once: `report`, `slow` and `arms` all read the same tree, and three
+# copies of the default is three places to forget when a corpus changes.
+TASK_ROOT="${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}"
 mkdir -p "${PRODUCTION}" 2>/dev/null
 
 # The corpus is read-only: it is not ours and must not be written to. Only
@@ -118,7 +121,15 @@ in_container() {
    so there is no path there that would have worked."
 }
 
-in_out()    { printf '/out%s\n'    "${1#${OD_OUT_ROOT}}"; }
+# Assign rather than substitute inline. `--json "$(in_container "${dir}")/x"`
+# reads as if a failure would stop the run, and does the opposite: the `die`
+# exits only the subshell, so the argument becomes `/x` and the command goes
+# ahead writing inside the container, onto a layer discarded when it exits.
+resolve() {   # $1 variable to set, $2 host path
+  local mapped
+  mapped="$(in_container "$2")" || exit 1
+  printf -v "$1" '%s' "${mapped}"
+}
 
 # NOT through the container: qsub does not exist inside the image. OD_PLAN
 # and OD_META_ROOT are derived here because passing them inline makes a
@@ -139,44 +150,52 @@ do_submit() {
 SUBCOMMAND="$1"; shift
 case "${SUBCOMMAND}" in
   inspect)
-    META_IN="$(in_container "${METADATA}")" || exit 1
+    resolve META_IN "${METADATA}"
     run python /work/scripts/inspect_metadata.py "${META_IN}" "$@"
     ;;
   resolution)
-    META_IN="$(in_container "${METADATA}")" || exit 1
+    resolve META_IN "${METADATA}"
+    resolve PROD_IN "${PRODUCTION}"
     run python /work/scripts/measure_resolution.py "${META_IN}" \
       --files "${OD_SAMPLE_FILES:-40}" \
-      --json "$(in_out "${PRODUCTION}")/resolution.json" "$@"
+      --json "${PROD_IN}/resolution.json" "$@"
     ;;
   verify)
-    SHARDS_IN="$(in_container \
-      "${OD_SHARDS:-${OD_ROOT}/datacomp/datacomp_1b/raw_shards}")" || exit 1
+    resolve SHARDS_IN \
+      "${OD_SHARDS:-${OD_ROOT}/datacomp/datacomp_1b/raw_shards}"
+    resolve PROD_IN "${PRODUCTION}"
     run python /work/scripts/verify_recorded_sizes.py "${SHARDS_IN}" \
       --files "${OD_SAMPLE_FILES:-40}" \
-      --baseline "$(in_out "${PRODUCTION}")/resolution.json" \
-      --json "$(in_out "${PRODUCTION}")/verify_sizes.json" "$@"
+      --baseline "${PROD_IN}/resolution.json" \
+      --json "${PROD_IN}/verify_sizes.json" "$@"
     ;;
   slow)
-    run python /work/scripts/diagnose_throughput.py \
-      "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
-      --json "$(in_out "${PRODUCTION}")/throughput.json" "$@"
+    resolve TASKS_IN "${TASK_ROOT}"
+    resolve PROD_IN "${PRODUCTION}"
+    run python /work/scripts/diagnose_throughput.py "${TASKS_IN}" \
+      --json "${PROD_IN}/throughput.json" "$@"
     ;;
   report)
-    run python /work/scripts/inspect_pilot.py \
-      "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
-      --json "$(in_out "${PRODUCTION}")/pilot_report.json" "$@"
+    resolve TASKS_IN "${TASK_ROOT}"
+    resolve PROD_IN "${PRODUCTION}"
+    run python /work/scripts/inspect_pilot.py "${TASKS_IN}" \
+      --json "${PROD_IN}/pilot_report.json" "$@"
     ;;
   salvage)
     [ $# -ge 1 ] || die "salvage needs at least one task directory"
     inside=""
-    for target in "$@"; do inside="${inside} $(in_out "${target}")"; done
+    for target in "$@"; do
+      resolve TASK_IN "${target}"
+      inside="${inside} ${TASK_IN}"
+    done
     # shellcheck disable=SC2086 -- the paths are container-side and known
     run python /work/scripts/salvage_task.py ${inside}
     ;;
   arms)
-    run python /work/scripts/compare_arms.py \
-      "$(in_out "${OD_TASK_ROOT:-${OD_OUT_ROOT}/datacomp/datacomp_1b/raw_shards}")" \
-      --json "$(in_out "${PRODUCTION}")/arms.json" "$@"
+    resolve TASKS_IN "${TASK_ROOT}"
+    resolve PROD_IN "${PRODUCTION}"
+    run python /work/scripts/compare_arms.py "${TASKS_IN}" \
+      --json "${PROD_IN}/arms.json" "$@"
     ;;
   experiment)
     # Four arms on tasks 8..11. Arms are numbered from 1 and map to tasks
@@ -200,15 +219,17 @@ case "${SUBCOMMAND}" in
     do_submit "$@"
     ;;
   plan)
-    META_IN="$(in_container "${METADATA}")" || exit 1
+    resolve META_IN "${METADATA}"
+    resolve PROD_IN "${PRODUCTION}"
     run python /work/scripts/plan_partition.py "${META_IN}" \
       --urls-per-task "${OD_URLS_PER_TASK:-1000000}" \
-      --json "$(in_out "${PRODUCTION}")/plan.json" "$@"
+      --json "${PROD_IN}/plan.json" "$@"
     ;;
   assess)
     [ $# -ge 1 ] || die "assess needs a task directory"
     target="$1"; shift
-    run python /work/scripts/assess_task.py "$(in_out "${target}")" "$@"
+    resolve TASK_IN "${target}"
+    run python /work/scripts/assess_task.py "${TASK_IN}" "$@"
     ;;
   exec)
     [ $# -ge 1 ] || die "exec needs a script name from scripts/"
