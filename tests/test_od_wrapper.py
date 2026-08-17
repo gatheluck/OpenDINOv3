@@ -287,3 +287,73 @@ def test_salvage_reaches_the_named_tasks(env) -> None:
 
 def test_salvage_without_a_task_is_refused(env) -> None:
     assert run(env, "salvage").returncode != 0
+
+
+# --------------------------------------------------------------------------
+# Metadata that is not in the predecessor's tree
+#
+# DataComp's metadata was already on the cluster, under a tree we bind
+# read-only. COYO and Re-LAION are not: Re-LAION's is gated on Hugging Face
+# and has to be fetched, and the only place we may write is our own output
+# root. So the corpus a wave is planned from will not always live under
+# OD_ROOT, and the container path has to be derived from whichever bind
+# actually contains it.
+# --------------------------------------------------------------------------
+
+def test_metadata_we_fetched_ourselves_is_reached(env) -> None:
+    """Re-LAION's metadata lands under our output root, not the corpus.
+
+    The failure this replaces was silent: `/corpus` was prepended to the
+    absolute path regardless, giving a directory that exists nowhere, and
+    the run went ahead and reported it had no parquet files.
+    """
+    meta = Path(env["OD_OUT_ROOT"]) / "relaion5b_research_safe" / "meta"
+    meta.mkdir(parents=True)
+    result = run({**env, "OD_METADATA": str(meta)}, "--dry-run", "plan")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "/out/relaion5b_research_safe/meta" in result.stdout, result.stdout
+    assert f"/corpus{meta}" not in result.stdout, result.stdout
+
+
+def test_a_path_under_neither_bind_is_refused(env, tmp_path) -> None:
+    """Refused rather than mapped to a guess.
+
+    Nothing outside the binds is visible inside the container, so there is
+    no path that would have worked. Saying so costs a second; the guess cost
+    a container start and an answer about the wrong directory.
+    """
+    stray = tmp_path / "elsewhere" / "meta"
+    stray.mkdir(parents=True)
+    result = run({**env, "OD_METADATA": str(stray)}, "--dry-run", "plan")
+
+    assert result.returncode != 0, result.stdout
+    assert "is not inside any bind" in result.stderr, result.stderr
+
+
+def test_a_root_prefix_that_stops_mid_name_is_not_a_match(env, tmp_path
+                                                          ) -> None:
+    """`<tmp>/corpus-backup` is not inside `<tmp>/corpus`.
+
+    Stripping the root as a plain string prefix accepts it and produces
+    `/corpus-backup/...`, which is inside the container's `/corpus` bind
+    only by coincidence of spelling. The match has to end at a separator.
+    """
+    sibling = tmp_path / "corpus-backup" / "meta"
+    sibling.mkdir(parents=True)
+    result = run({**env, "OD_METADATA": str(sibling)}, "--dry-run", "plan")
+
+    assert result.returncode != 0, result.stdout
+    assert "is not inside any bind" in result.stderr, result.stderr
+
+
+def test_shards_we_produced_can_be_verified_against_the_baseline(env) -> None:
+    """`verify` reads a shard tree. For a corpus we downloaded that tree is
+    ours, under the output root, not the predecessor's."""
+    shards = Path(env["OD_OUT_ROOT"]) / "relaion5b_research_safe" / "raw_shards"
+    shards.mkdir(parents=True)
+    result = run({**env, "OD_SHARDS": str(shards)}, "--dry-run", "verify")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "/out/relaion5b_research_safe/raw_shards" in result.stdout
+    assert f"/corpus{shards}" not in result.stdout, result.stdout
