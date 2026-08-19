@@ -58,13 +58,6 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def handle_error(self, *args):
-        # Abandoning a connection without reading the body is what the client
-        # does on a 403, deliberately. The server logging a broken pipe for it
-        # is expected; printing a traceback per occurrence would bury a real
-        # failure in the CI output.
-        pass
-
     def _send(self, code, body=b"", headers=()):
         self.send_response(code)
         for name, value in headers:
@@ -93,10 +86,24 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(200, JPEG)
 
 
+class _QuietServer(ThreadingHTTPServer):
+    """Abandoning a connection without reading the body is what the client
+    does on a 403, deliberately. The server logging a broken pipe for it is
+    expected, and a traceback per occurrence would bury a real failure in
+    the CI output.
+
+    `handle_error` belongs to the server, not the handler — put on the
+    handler it is never called and the output stays noisy.
+    """
+
+    def handle_error(self, request, client_address):
+        pass
+
+
 @pytest.fixture
 def server():
     _Handler.connections = 0
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    httpd = _QuietServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
