@@ -449,6 +449,34 @@ def test_the_limit_is_on_subjobs_not_on_the_concurrency_cap(tmp_path
 # having downloaded nothing of the corpus it was asked for.
 # --------------------------------------------------------------------------
 
+def test_the_pooled_downloader_choice_reaches_the_generated_job(tmp_path
+                                                                 ) -> None:
+    """Exporting a variable in the submitting shell does not reach the node.
+
+    The generated job script is the only channel, and `singularity exec
+    --env` past it is an explicit list rather than inheritance. Four
+    round-trips were lost to exactly this with OD_BLUR_FACES.
+    """
+    env = make_env(tmp_path)
+    env["OD_HTTP_POOL"] = "1"
+    submit(env, "--from", "0", "--to", "7", "--dry-run")
+
+    job = (Path(env["OD_OUT_ROOT"]) / "logs"
+           / "production_job.generated.sh").read_text()
+    assert "export OD_HTTP_POOL=1" in job, job
+
+
+def test_the_job_forwards_the_pool_setting_into_the_container() -> None:
+    """The second half of the same channel, checked in the script itself.
+
+    A test that only asserted the export would pass while the container ran
+    without the setting — which is the shape the OD_BLUR_FACES bug had.
+    """
+    job = (SCRIPTS / "production_job.sh").read_text()
+    assert '--env "OD_HTTP_POOL=' in job, (
+        "singularity --env is an explicit list; exporting is not enough")
+
+
 def datacomp_env(tmp_path, **over):
     """make_env, but with a plan whose metadata is DataComp's."""
     env = make_env(tmp_path, **over)

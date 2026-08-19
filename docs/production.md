@@ -221,8 +221,38 @@ After a wave, before widening it:
 python scripts/assess_task.py "${OD_TASK_ROOT}/task-000000"
 ```
 
+## Connection reuse — `OD_HTTP_POOL`
+
+img2dataset opens a TCP connection and a TLS session per image and closes it
+immediately. At 32 processes × 32 threads a node is creating 1,024 setups
+continuously, and each is an entry in whatever stateful device sits between
+the cluster and the internet.
+
+That is what a 900-subjob wave ran out of. At 20 nodes — 20,480 concurrent
+connections — 35.3% of attempts returned `Network is unreachable` and 38.5%
+`timed out`, while DNS stayed normal at 6.1% and the 400 Gbps external link
+carried 0.005% of its capacity. 57 of 63 finished subjobs were killed at the
+walltime having stored nothing. Cutting to 4 nodes raised the per-node rate
+3.3×, from 9.8 to 32.7 URLs/s. Bandwidth was never the constraint.
+
+`OD_HTTP_POOL=1` routes the wave through `scripts/img2dataset_pooled.py`,
+which keeps connections per host and reuses them: fifty sequential images
+from one host cost one connection instead of fifty. It is **off by default**
+— the upstream downloader fetched every image in the corpus so far.
+
+ABCI permits outbound 80/443 from compute nodes without application, and
+documents no bandwidth cap, so this is the one lever on that mechanism that
+does not need the site to change anything.
+
+Which downloader ran is recorded in each task's `img2dataset.cmd`. A
+throughput figure cannot be attributed without it.
+
 ## What is not settled
 
+- **Whether reuse is worth much depends on host concentration**, which has
+  not been measured. Every URL on a distinct host would reuse nothing. The
+  gain is bounded by how often a shard's URLs share a host, and the honest
+  way to find out is to run a wave with it on and compare.
 - **Node counts above two are extrapolation.** 0003 measured one and two.
   The ramp exists for that reason; widen a wave only after the previous one
   held its yield.
