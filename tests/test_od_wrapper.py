@@ -206,8 +206,25 @@ def test_slow_reaches_our_own_task_root(env) -> None:
     assert "--node-hours 15.7" in result.stdout
 
 
+def test_hosts_reaches_the_metadata_and_uses_the_shard_size(env) -> None:
+    """Reuse cannot cross a shard, so the window must be the shard size.
+
+    A default window would report concentration the pool could never
+    realise, and the decision to enable pooling would rest on it.
+    """
+    result = run({**env, "OD_SAMPLES_PER_SHARD": "10000"},
+                 "--dry-run", "hosts")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "measure_host_concentration.py" in result.stdout
+    assert "/corpus/datacomp/datacomp_1b/upstream_metadata" in result.stdout
+    assert "--window 10000" in result.stdout, result.stdout
+    assert "host_concentration.json" in result.stdout
+
+
 @pytest.mark.parametrize("name", [
-    "inspect", "resolution", "verify", "plan", "report", "slow", "submit",
+    "inspect", "resolution", "hosts", "verify", "plan", "report", "slow",
+    "submit",
 ])
 def test_every_advertised_subcommand_is_dispatchable(env, name) -> None:
     """The usage text and the dispatcher must not drift apart. `slow` was

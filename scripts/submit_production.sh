@@ -262,6 +262,9 @@ JOB="${OD_LOGDIR}/production_job.generated.sh"
   echo "export OD_SAMPLES_PER_SHARD=$(printf '%q' "${SAMPLES_PER_SHARD}")"
   echo "export OD_BLUR_FACES=$(printf '%q' "${OD_BLUR_FACES}")"
   echo "export OD_TASK_ID_OFFSET=$(printf '%q' "${TASK_ID_OFFSET}")"
+  # Optional, so it carries its default rather than being required: unset
+  # means the upstream downloader, which is what every wave so far used.
+  echo "export OD_HTTP_POOL=$(printf '%q' "${OD_HTTP_POOL:-0}")"
   echo
   # The body is production_job.sh unless an experiment substitutes its own.
   # Substituting keeps one submitter, so the environment checks, the plan

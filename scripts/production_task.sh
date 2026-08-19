@@ -314,8 +314,27 @@ IMG2DATASET_ARGS=(
   --enable_wandb False
   --incremental_mode incremental
 )
-printf '%s\n' "${IMG2DATASET_ARGS[@]}" > "${TASK_DIR}/img2dataset.cmd"
-img2dataset "${IMG2DATASET_ARGS[@]}" \
+# Which downloader fetches the images. The upstream one opens a TCP
+# connection and a TLS session per image; ours pools them per host and
+# reuses them. Off by default: the upstream path fetched every image in the
+# corpus so far, and reuse is new.
+#
+# The wave at 20 nodes failed on connection count, not bandwidth —
+# `Network is unreachable` 35.3%, `timed out` 38.5%, DNS normal at 6.1%, the
+# 400 Gbps link at 0.005%. Reuse is the one lever on that mechanism that
+# does not need the site to change anything.
+if [ "${OD_HTTP_POOL:-0}" = "1" ]; then
+  DOWNLOADER=(python "${REPO}/scripts/img2dataset_pooled.py")
+else
+  DOWNLOADER=(img2dataset)
+fi
+
+# Recorded with the argv, not beside it: a throughput number is meaningless
+# without knowing which downloader produced it, and DONE.json records only
+# what was intended.
+printf '%s\n' "${DOWNLOADER[@]}" "${IMG2DATASET_ARGS[@]}" \
+  > "${TASK_DIR}/img2dataset.cmd"
+"${DOWNLOADER[@]}" "${IMG2DATASET_ARGS[@]}" \
   > "${TASK_DIR}/img2dataset.log" 2>&1
 rc=$?
 t1=$(date +%s)

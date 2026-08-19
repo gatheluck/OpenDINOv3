@@ -532,6 +532,37 @@ def test_a_retry_after_an_outage_does_not_inherit_the_empty_shards(workspace
     assert done["successes"] == TASK_ROWS, "the empty shard was inherited"
 
 
+def test_the_pooled_downloader_runs_the_task_and_says_it_did(workspace
+                                                              ) -> None:
+    """Reuse must produce the same corpus, and leave a record that it was on.
+
+    DONE.json says what was intended; img2dataset.cmd says what ran. Which
+    downloader fetched a task changes its throughput completely, so a rate
+    measured later cannot be attributed without it.
+    """
+    plan, task_root = workspace
+    result = run_task(plan, task_root, OD_HTTP_POOL="1")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    task_dir = task_root / "task-000000"
+    done = json.loads((task_dir / "DONE.json").read_text())
+    assert done["successes"] == TASK_ROWS, result.stdout + result.stderr
+
+    recorded = (task_dir / "img2dataset.cmd").read_text()
+    assert "img2dataset_pooled.py" in recorded, recorded
+
+
+def test_the_upstream_downloader_stays_the_default(workspace) -> None:
+    """Off unless asked for. The pooled path is new; the other has fetched
+    every image in the corpus so far."""
+    plan, task_root = workspace
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    recorded = (task_root / "task-000000" / "img2dataset.cmd").read_text()
+    assert "img2dataset_pooled.py" not in recorded, recorded
+
+
 # --------------------------------------------------------------------------
 # A corpus that is not DataComp
 #
