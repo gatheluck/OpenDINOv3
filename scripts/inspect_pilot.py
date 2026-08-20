@@ -39,6 +39,7 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from opendinov3.core import resolution_stats as rs  # noqa: E402
+from opendinov3.core import shard_layout as sl  # noqa: E402
 
 #: Yield below this and the 902-million-image plan is wrong.
 MIN_YIELD = 0.30
@@ -114,13 +115,13 @@ def main() -> int:
         candidates += int(marker.get("candidates", 0))
         successes += int(marker.get("successes", 0))
 
-        tars = sorted((task / "shards").glob("*.tar"))
+        tars = sl.tar_files(task)
         if not tars:
             empty_tasks.append(task.name)
             continue
         shard_bytes += sum(t.stat().st_size for t in tars)
 
-        for path in sorted((task / "shards").glob("*.parquet")):
+        for path in sl.parquet_files(task):
             parquet_bytes += path.stat().st_size
             table = pq.read_table(path)
             names = table.schema.names
@@ -155,7 +156,7 @@ def main() -> int:
     opened = decode_failures = caption_mismatches = 0
     per_task = max(1, args.samples // len(done))
     for task in done:
-        for path in sorted((task / "shards").glob("*.tar"))[:2]:
+        for path in sl.tar_files(task)[:2]:
             for key, jpg, text in read_shard_tar(path, per_task):
                 opened += 1
                 try:
