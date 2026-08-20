@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from opendinov3.core import shard_layout as sl  # noqa: E402
 from opendinov3.core import task_health as th  # noqa: E402
 from opendinov3.core.download_stats import RunSummary  # noqa: E402
 
@@ -34,7 +35,10 @@ def load_stats(task_dir: Path) -> list[dict]:
     # empty shards into `attempt-<tag>/` INSIDE the task directory, as
     # evidence; counting them would drag the yield down with data the task
     # deliberately discarded, and reject a healthy retry.
-    for path in sorted((task_dir / "shards").glob("*_stats.json")):
+    # Either tree's layout: ours nests them under `shards/`, the
+    # predecessor's leaves them in the task directory. Neither descends into
+    # `attempt-<tag>/`, which is what the note above is about.
+    for path in sl.stats_files(task_dir):
         try:
             found.append(json.loads(path.read_text()))
         except (OSError, json.JSONDecodeError) as exc:

@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from opendinov3.core import download_stats as ds  # noqa: E402
+from opendinov3.core import shard_layout as sl  # noqa: E402
 from opendinov3.core import throughput_model as tm  # noqa: E402
 
 #: Settings the wave ran with, from scripts/production_task.sh.
@@ -57,7 +58,7 @@ def main() -> int:
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
 
-    stats = sorted(args.task_root.glob("task-*/shards/*_stats.json"))
+    stats = sl.all_stats_files(args.task_root)
     if not stats:
         print(f"no completed shards under {args.task_root}", file=sys.stderr)
         return 2
