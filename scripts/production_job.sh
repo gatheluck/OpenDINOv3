@@ -88,6 +88,13 @@ if [ -z "${OD_META_ROOT:-}" ]; then
   exit 1
 fi
 
+# The last three are passed through empty rather than with a default:
+# production_task.sh already defines what each falls back to, and repeating
+# it here is a second copy to drift. `:-` treats empty as unset.
+#
+# No comments inside the continuation below. A `#` on a continued line ends
+# the command and runs the remainder as a separate one — `bash -n` accepts
+# it, and the SIF path silently disappears.
 singularity exec \
   --bind "${OD_REPO}:/work:ro" \
   --bind "${PLAN_DIR}:/plan:ro" \
@@ -110,6 +117,9 @@ singularity exec \
   --env "OD_HTTP_POOL=${OD_HTTP_POOL:-0}" \
   --env "OD_DNS_CACHE=${OD_DNS_CACHE:-0}" \
   --env "OD_DNS_CACHE_TTL=${OD_DNS_CACHE_TTL:-}" \
+  --env "OD_CARRY_COLUMNS=${OD_CARRY_COLUMNS:-}" \
+  --env "OD_SKIP_REENCODE=${OD_SKIP_REENCODE:-}" \
+  --env "OD_LOCK_STALE_SECONDS=${OD_LOCK_STALE_SECONDS:-}" \
   "${OD_SIF}" bash /work/scripts/production_task.sh
 rc=$?
 

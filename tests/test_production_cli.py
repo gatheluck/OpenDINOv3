@@ -12,6 +12,7 @@ after writing nothing is exactly how 474 tasks were lost.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -467,6 +468,43 @@ def test_a_tuning_switch_reaches_the_generated_job(tmp_path, variable
     assert f"export {variable}=1" in job, job
 
 
+#: Read by the runner but deliberately not forwarded. Empty, and adding to
+#: it needs a reason written here: every entry is a knob an operator can set
+#: and watch do nothing.
+NOT_FORWARDED: dict[str, str] = {}
+
+
+def settings_read_by_the_runner() -> set[str]:
+    return set(re.findall(r"\$\{(OD_[A-Z_]+)", (SCRIPTS / "production_task.sh").read_text()))
+
+
+def settings_forwarded_by_the_job() -> set[str]:
+    return set(re.findall(r'--env "(OD_[A-Z_]+)=', (SCRIPTS / "production_job.sh").read_text()))
+
+
+def test_every_setting_the_runner_reads_reaches_the_container() -> None:
+    """The general form of the bug that keeps recurring.
+
+    `singularity exec --env` is an explicit list, not inheritance. A variable
+    the runner reads but the job does not forward is a knob that an operator
+    sets, sees accepted, and that silently does nothing on the node.
+
+    OD_BLUR_FACES cost four round-trips this way. OD_CARRY_COLUMNS would have
+    been worse: it decides which columns the shards carry, so the loss shows
+    up as a corpus missing a column after the terabytes are already down.
+
+    Per-variable tests cannot catch the next one. This can.
+    """
+    missing = (settings_read_by_the_runner()
+               - settings_forwarded_by_the_job()
+               - set(NOT_FORWARDED))
+
+    assert not missing, (
+        f"{sorted(missing)} are read on the node but never sent there; "
+        "add them to production_job.sh's --env list, or to NOT_FORWARDED "
+        "with the reason")
+
+
 @pytest.mark.parametrize("variable", ["OD_HTTP_POOL", "OD_DNS_CACHE"])
 def test_the_job_forwards_a_tuning_switch_into_the_container(variable
                                                               ) -> None:
@@ -563,3 +601,83 @@ def test_a_plan_that_does_not_say_which_corpus_still_defaults(tmp_path
     result = submit(env, "--from", "0", "--to", "7", "--dry-run")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "datacomp/datacomp_1b/raw_shards" in result.stdout, result.stdout
+
+
+# --------------------------------------------------------------------------
+# production_job.sh, actually executed
+#
+# Nothing in the suite ran this script. It is the one that runs on every
+# node, and the checks on it were all reading its text.
+#
+# That gap bit immediately: a comment placed inside the backslash
+# continuation of the `singularity exec` call ends the command and runs the
+# remainder as a separate one. `bash -n` accepts it. Every text-based test
+# passes. The SIF path and the command silently disappear, and every subjob
+# in the wave does nothing.
+# --------------------------------------------------------------------------
+
+ENV_DUMP_STUB = Path(__file__).resolve().parent / "stubs" / "env_dump"
+
+
+def run_job(tmp_path, **over) -> tuple[subprocess.CompletedProcess, str]:
+    """Run production_job.sh with a stand-in for singularity."""
+    import os
+    out = tmp_path / "out"
+    (out / "tasks").mkdir(parents=True)
+    (out / "meta").mkdir(parents=True)
+    (out / "opendinov3.sif").write_bytes(b"")
+    plan = out / "plan.json"
+    plan.write_text(json.dumps({"urls_per_task": 1, "total_rows": 1,
+                                "tasks": [{"task_id": 0, "rows": 1,
+                                           "pieces": []}]}))
+    dump = tmp_path / "env.txt"
+    env = {**os.environ,
+           "PATH": f"{ENV_DUMP_STUB}:{os.environ['PATH']}",
+           "OD_ENV_DUMP": str(dump),
+           "OD_SIF": str(out / "opendinov3.sif"),
+           "OD_REPO": str(SCRIPTS.parent),
+           "OD_PLAN": str(plan),
+           "OD_TASK_ROOT": str(out / "tasks"),
+           "OD_META_ROOT": str(out / "meta"),
+           "OD_PROCESSES": "2", "OD_THREADS": "2",
+           "OD_SAMPLES_PER_SHARD": "4", "OD_BLUR_FACES": "1",
+           "OD_TASK_ID": "0", "PBS_LOCALDIR": str(tmp_path / "local"),
+           **over}
+    result = subprocess.run(["bash", str(SCRIPTS / "production_job.sh")],
+                            capture_output=True, text=True, env=env)
+    return result, dump.read_text() if dump.exists() else ""
+
+
+def test_the_job_reaches_the_image_and_the_command(tmp_path) -> None:
+    """The truncation check. A broken continuation leaves nothing after the
+    binds and env, and this is the only test that can tell."""
+    result, dumped = run_job(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    _, _, tail = dumped.partition("---\n")
+    assert ".sif" in tail, f"the image never reached singularity: {tail!r}"
+    assert "production_task.sh" in tail, (
+        f"the command never reached singularity: {tail!r}")
+
+
+def test_every_setting_actually_arrives_in_the_container(tmp_path) -> None:
+    """The behavioural form of the text check above.
+
+    Reading the script proves the line was written. Running it proves the
+    line survives the shell.
+    """
+    result, dumped = run_job(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    arrived = {pair.split("=", 1)[0] for pair in dumped.splitlines()
+               if "=" in pair}
+    missing = (settings_read_by_the_runner() - arrived - set(NOT_FORWARDED))
+
+    assert not missing, f"{sorted(missing)} never arrived in the container"
+
+
+def test_a_setting_given_to_the_job_arrives_with_its_value(tmp_path) -> None:
+    """Forwarding the name is not the same as forwarding the value."""
+    _, dumped = run_job(tmp_path, OD_CARRY_COLUMNS="uid sha256")
+
+    assert "OD_CARRY_COLUMNS=uid sha256" in dumped, dumped
