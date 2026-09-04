@@ -314,27 +314,28 @@ IMG2DATASET_ARGS=(
   --enable_wandb False
   --incremental_mode incremental
 )
-# Which downloader fetches the images. The upstream one opens a TCP
-# connection and a TLS session per image; ours pools them per host and
-# reuses them. Off by default: the upstream path fetched every image in the
-# corpus so far, and reuse is new.
+# Network tuning, applied in the workers rather than here.
 #
-# The wave at 20 nodes failed on connection count, not bandwidth —
-# `Network is unreachable` 35.3%, `timed out` 38.5%, DNS normal at 6.1%, the
-# 400 Gbps link at 0.005%. Reuse is the one lever on that mechanism that
-# does not need the site to change anything.
-if [ "${OD_HTTP_POOL:-0}" = "1" ]; then
-  DOWNLOADER=(python "${REPO}/scripts/img2dataset_pooled.py")
-else
-  DOWNLOADER=(img2dataset)
+# img2dataset's distributor calls get_context("spawn"), so a spawned worker
+# starts a fresh interpreter and inherits nothing from this process. The
+# environment is the only channel that reaches it. PYTHONPATH puts
+# src/sitecustomize.py on the workers' path; Python imports it at startup,
+# and it installs whichever patches the switches ask for.
+#
+# An earlier attempt patched img2dataset from a wrapper script and did
+# nothing at all in production: the parent got the patch and downloaded no
+# images, the 32 workers got none and downloaded all of them.
+#
+# Two switches, two different limits, measured separately:
+#   OD_HTTP_POOL  20 nodes exhausted connections — `unreachable` 35.3%
+#   OD_DNS_CACHE   8 nodes exhausted the resolver — DNS 76.6%, yield 17.4%
+# Both off by default; upstream behaviour has fetched every image so far.
+if [ "${OD_HTTP_POOL:-0}" = "1" ] || [ "${OD_DNS_CACHE:-0}" = "1" ]; then
+  export PYTHONPATH="${REPO}/src${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
-# Recorded with the argv, not beside it: a throughput number is meaningless
-# without knowing which downloader produced it, and DONE.json records only
-# what was intended.
-printf '%s\n' "${DOWNLOADER[@]}" "${IMG2DATASET_ARGS[@]}" \
-  > "${TASK_DIR}/img2dataset.cmd"
-"${DOWNLOADER[@]}" "${IMG2DATASET_ARGS[@]}" \
+printf '%s\n' "${IMG2DATASET_ARGS[@]}" > "${TASK_DIR}/img2dataset.cmd"
+img2dataset "${IMG2DATASET_ARGS[@]}" \
   > "${TASK_DIR}/img2dataset.log" 2>&1
 rc=$?
 t1=$(date +%s)
@@ -361,10 +362,11 @@ fi
 # --- done --------------------------------------------------------------------
 python - "${TASK_DIR}" "${OD_TASK_ID}" "$((t1 - t0))" \
         "${PROCESSES}" "${THREADS}" "${SAMPLES_PER_SHARD}" \
-        "${TIMEOUT}" "${RETRIES}" "${PLANNED_URLS}" <<'PY'
+        "${TIMEOUT}" "${RETRIES}" "${PLANNED_URLS}" \
+        "${OD_HTTP_POOL:-0}" "${OD_DNS_CACHE:-0}" <<'PY'
 import json, sys, datetime, pathlib
 (task_dir, task_id, wall, procs, threads, sps, timeout, retries,
- planned) = sys.argv[1:10]
+ planned, http_pool, dns_cache) = sys.argv[1:12]
 health = json.loads((pathlib.Path(task_dir) / "health.json").read_text())
 (pathlib.Path(task_dir) / "DONE.json").write_text(json.dumps({
     "task_id": int(task_id),
@@ -381,7 +383,11 @@ health = json.loads((pathlib.Path(task_dir) / "health.json").read_text())
                  "samples_per_shard": int(sps),
                  "image_size": 256, "resize_mode": "no",
                  "compute_hash": "sha256",
-                 "timeout": int(timeout), "retries": int(retries)},
+                 "timeout": int(timeout), "retries": int(retries),
+                 # Which network tuning was active. The argv is identical
+                 # either way, so this is the only record of it — and a
+                 # throughput figure cannot be attributed without it.
+                 "http_pool": int(http_pool), "dns_cache": int(dns_cache)},
 }, indent=1))
 PY
 
