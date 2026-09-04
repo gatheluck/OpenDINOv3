@@ -127,10 +127,79 @@ def test_no_previous_attempt_is_a_no_op(tmp_path) -> None:
     assert pr.prepare(tmp_path, "retry") == (0, 0)
 
 
-def test_the_boundary_is_the_documented_one(tmp_path) -> None:
-    """5%: the outage stored 0.1%, healthy shards store 58-65%. Nothing
-    real sits near the line, which is why it can be a simple floor."""
-    shard(tmp_path, 0, count=10_000, successes=500)     # exactly 5%
-    shard(tmp_path, 1, count=10_000, successes=499)     # just under
+def test_the_boundary_is_the_task_gate(tmp_path) -> None:
+    """The line a shard must clear is the one the task must clear.
+
+    It used to be 5%, reasoned from the outage storing 0.1% and healthy
+    shards storing 58-65%: nothing real sat near the line, so a simple floor
+    would do. The DNS-saturated wave then landed 71 tasks at 17.4% — inside
+    the band that reasoning assumed was empty — and every shard was kept.
+
+    A floor chosen for the failures already seen does not hold against the
+    next one. Tying it to the gate does.
+    """
+    shard(tmp_path, 0, count=10_000, successes=3_000)   # exactly 30%
+    shard(tmp_path, 1, count=10_000, successes=2_999)   # just under
     kept, aside = pr.prepare(tmp_path, "retry")
     assert (kept, aside) == (1, 1)
+
+
+# --------------------------------------------------------------------------
+# A shard must never be inherited if it alone would fail the task
+#
+# The shard threshold was 0.05 and the task gate 0.30, so a retry could keep
+# shards that guarantee the task is rejected — and `--incremental_mode
+# incremental` then skips them, so nothing re-downloads and the yield can
+# never recover. The task is retried, inherits the same shards, is rejected
+# again, forever.
+#
+# It happened: an 8-node wave saturated the DNS resolver and produced 71
+# tasks at 17.4% yield with DNS failing for 76.6% of attempts. Every shard
+# was above 0.05 and every task below 0.30.
+# --------------------------------------------------------------------------
+
+def test_a_shard_below_the_task_gate_is_never_inherited() -> None:
+    """The invariant, stated where it can be checked.
+
+    Below the task's own threshold, a kept shard is not a head start — it is
+    a guarantee that the task fails, and a retry cannot undo it because
+    incremental mode will not fetch a shard that already has output.
+    """
+    from opendinov3.core import task_health as th
+
+    assert pr.MIN_SHARD_YIELD >= th.MIN_YIELD, (
+        f"shards are inherited at {pr.MIN_SHARD_YIELD:.0%} but a task needs "
+        f"{th.MIN_YIELD:.0%}: a retry can inherit its own failure")
+
+
+def test_a_degraded_shard_is_set_aside_rather_than_kept(tmp_path) -> None:
+    """17.4% is what the DNS-saturated wave produced. It is well clear of
+    the outage's 0.1%, which is why the old 5% threshold kept it."""
+    task = tmp_path / "task-000399"
+    shards = task / "shards"
+    shards.mkdir(parents=True)
+    (shards / "00000.tar").write_bytes(b"x")
+    (shards / "00000_stats.json").write_text(
+        json.dumps({"count": 10000, "successes": 1740}))
+
+    kept, aside = pr.prepare(task, "dns-saturated")
+
+    assert kept == 0, "a shard that dooms the task was inherited"
+    assert aside == 1
+    assert not (shards / "00000_stats.json").exists()
+
+
+def test_a_healthy_shard_is_still_kept(tmp_path) -> None:
+    """Healthy shards run 58-65%. Re-downloading them would undo the whole
+    point of resuming."""
+    task = tmp_path / "task-000400"
+    shards = task / "shards"
+    shards.mkdir(parents=True)
+    (shards / "00000.tar").write_bytes(b"x")
+    (shards / "00000_stats.json").write_text(
+        json.dumps({"count": 10000, "successes": 6400}))
+
+    kept, aside = pr.prepare(task, "healthy")
+
+    assert (kept, aside) == (1, 0)
+    assert (shards / "00000_stats.json").exists()

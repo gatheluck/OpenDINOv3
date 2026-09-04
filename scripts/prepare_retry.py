@@ -39,9 +39,25 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from opendinov3.core import task_health as th  # noqa: E402
+
 #: A shard below this stored so little that inheriting it would bake the
-#: loss in. The outage produced 0.1%; healthy shards run 58-65%.
-MIN_SHARD_YIELD = 0.05
+#: loss in. Healthy shards run 58-65%.
+#:
+#: Tied to the task gate rather than chosen separately, because below that
+#: line a kept shard is not a head start — it is a guarantee the task fails.
+#: `--incremental_mode incremental` will not refetch a shard that already has
+#: output, so the yield can never recover: the task is retried, inherits the
+#: same shards, and is rejected again, forever.
+#:
+#: This was 0.05 against a gate of 0.30, and the gap was not theoretical. An
+#: 8-node wave saturated the DNS resolver — 76.6% of attempts failed to
+#: resolve — and left 71 tasks at 17.4% yield. Every shard cleared 5%; every
+#: task missed 30%. Pinned by
+#: test_a_shard_below_the_task_gate_is_never_inherited.
+MIN_SHARD_YIELD = th.MIN_YIELD
 
 SHARD = re.compile(r"^(\d+)")
 
