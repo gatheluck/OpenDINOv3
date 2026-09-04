@@ -247,12 +247,59 @@ does not need the site to change anything.
 Which downloader ran is recorded in each task's `img2dataset.cmd`. A
 throughput figure cannot be attributed without it.
 
+## Name caching — `OD_DNS_CACHE`
+
+Scaling from 4 nodes to 8 did not run out of connections. `unreachable`
+stayed at 0.1%; **DNS failures went from 6.2% to 76.6%** and yield from
+64.0% to 17.4%. Eight nodes ask the shared resolver for about 4,600 names a
+second.
+
+`OD_DNS_CACHE=1` caches successful lookups in each worker process.
+`od.sh hosts` measured 500,000 URLs across 118,834 hosts, so 76% of lookups
+repeat — and unlike connection reuse, nothing on the far side expires the
+entry, so most of that is realisable. The cache is per process and a node
+runs 32, so a host is still resolved up to 32 times per node rather than
+once.
+
+`OD_DNS_CACHE_TTL` overrides the default in seconds. The default spans one
+shard: a worker takes one shard at a time, and at 575 URL/s per node across
+32 processes a 10,000-URL shard takes about 556 s.
+
+**Failures are never cached.** Under a saturated resolver a failure is
+transient by definition, and caching one would turn a blip into a certainty
+for the whole TTL — at the moment the resolver is already worst.
+
+## How the switches reach the workers
+
+img2dataset's distributor calls `get_context("spawn")`. A spawned worker
+starts a fresh interpreter and inherits nothing from the process that
+launched it, so **a patch applied anywhere in the runner reaches the parent
+and none of the 32 workers.** Connection reuse shipped that way and did
+nothing at all in production while its end-to-end test passed.
+
+The patches live in `src/sitecustomize.py`. Python imports `sitecustomize`
+at interpreter startup from anything on `sys.path`, so every worker runs it,
+including the replacements `maxtasksperchild=5` creates part-way through a
+shard. `production_task.sh` puts it on `PYTHONPATH` when either switch is
+on, for img2dataset and its children only.
+
+The argv is identical either way, so **`img2dataset.cmd` cannot tell you
+which tuning ran** — `DONE.json`'s `settings.http_pool` and
+`settings.dns_cache` record it.
+
+Both switches are off by default. Upstream behaviour has fetched every image
+in the corpus so far.
+
 ## What is not settled
 
-- **Whether reuse is worth much depends on host concentration**, which has
-  not been measured. Every URL on a distinct host would reuse nothing. The
-  gain is bounded by how often a shard's URLs share a host, and the honest
-  way to find out is to run a wave with it on and compare.
+- **Where either ceiling is now.** Connections ran out at 20 nodes and the
+  resolver at 8, both measured before ABCI raised the limit in early
+  September. Neither has been re-measured with the cache on.
+- **Whether reuse is worth much depends on host concentration.** Measured at
+  1.98 URLs per host per shard, so half the connection setups could go — but
+  a host's two appearances are minutes apart on average and servers close
+  keep-alive connections in tens of seconds, so the realised saving is
+  smaller. The DNS cache does not have that problem.
 - **Node counts above two are extrapolation.** 0003 measured one and two.
   The ramp exists for that reason; widen a wave only after the previous one
   held its yield.

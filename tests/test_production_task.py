@@ -21,7 +21,9 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pyarrow as pa
@@ -532,35 +534,160 @@ def test_a_retry_after_an_outage_does_not_inherit_the_empty_shards(workspace
     assert done["successes"] == TASK_ROWS, "the empty shard was inherited"
 
 
-def test_the_pooled_downloader_runs_the_task_and_says_it_did(workspace
-                                                              ) -> None:
-    """Reuse must produce the same corpus, and leave a record that it was on.
+def test_the_tuning_reaches_the_workers_and_is_recorded(workspace) -> None:
+    """The patches live in `sitecustomize`, reached through PYTHONPATH.
 
-    DONE.json says what was intended; img2dataset.cmd says what ran. Which
-    downloader fetched a task changes its throughput completely, so a rate
-    measured later cannot be attributed without it.
+    img2dataset spawns its workers, so nothing the runner does in its own
+    interpreter reaches them; only the environment does. The task must still
+    produce the same corpus, and DONE.json must say which settings produced
+    it — a throughput figure cannot be attributed without that.
     """
     plan, task_root = workspace
+    result = run_task(plan, task_root, OD_HTTP_POOL="1", OD_DNS_CACHE="1")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["successes"] == TASK_ROWS, result.stdout + result.stderr
+    assert done["settings"]["http_pool"] == 1
+    assert done["settings"]["dns_cache"] == 1
+
+
+# --------------------------------------------------------------------------
+# Does the tuning actually reach the workers?
+#
+# DONE.json records the switches, which says what was asked for, not what
+# happened. Connection pooling once shipped with a passing end-to-end test
+# and did nothing at all: img2dataset spawns its workers, so the patch stayed
+# in the parent, which downloads no images.
+#
+# The only honest check is at the other end of the wire. This server counts
+# TCP connections, so reuse is visible as an absence of them.
+# --------------------------------------------------------------------------
+
+class _CountingHandler(BaseHTTPRequestHandler):
+    # Keep-alive needs HTTP/1.1; under 1.0 every response closes the socket
+    # and the count could not tell reuse from its absence.
+    protocol_version = "HTTP/1.1"
+    connections = 0
+    body = b""
+
+    def setup(self):        # once per CONNECTION, not per request
+        super().setup()
+        type(self).connections += 1
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(type(self).body)))
+        self.end_headers()
+        self.wfile.write(type(self).body)
+
+
+class _QuietCounter(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        pass            # a worker hanging up is not a test failure
+
+
+@pytest.fixture
+def counted(tmp_path):
+    """A plan whose URLs all point at a server that counts connections."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), (10, 100, 150)).save(buffer, format="JPEG")
+    _CountingHandler.body = buffer.getvalue()
+    _CountingHandler.connections = 0
+
+    httpd = _QuietCounter(("127.0.0.1", 0), _CountingHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    source = meta / "a.parquet"
+    pq.write_table(pa.table({
+        "url": [f"{base}/{i:04d}.jpg" for i in range(TASK_ROWS)],
+        "text": [f"caption {i}" for i in range(TASK_ROWS)],
+        "uid": [f"{i:09d}" for i in range(TASK_ROWS)],
+    }), source)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({
+        "urls_per_task": TASK_ROWS, "total_rows": TASK_ROWS,
+        "tasks": [{"task_id": 0, "rows": TASK_ROWS,
+                   "pieces": [{"path": str(source), "start": 0,
+                               "end": TASK_ROWS}]}],
+    }))
+    try:
+        yield plan, tmp_path / "tasks", _CountingHandler
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_without_pooling_every_image_costs_a_connection(counted) -> None:
+    """The baseline the fix is measured against, and upstream's behaviour."""
+    plan, task_root, handler = counted
+    result = run_task(plan, task_root)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert handler.connections >= TASK_ROWS, (
+        f"{handler.connections} connections for {TASK_ROWS} images — fewer "
+        "than one each means the baseline is not what is claimed")
+
+
+def test_pooling_reaches_the_workers_and_removes_connections(counted) -> None:
+    """Measured at the socket, because that is the only place it is real.
+
+    Removing the PYTHONPATH line from production_task.sh leaves DONE.json
+    saying `http_pool: 1` and every other test passing. This one fails.
+    """
+    plan, task_root, handler = counted
     result = run_task(plan, task_root, OD_HTTP_POOL="1")
     assert result.returncode == 0, result.stdout + result.stderr
 
-    task_dir = task_root / "task-000000"
-    done = json.loads((task_dir / "DONE.json").read_text())
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
     assert done["successes"] == TASK_ROWS, result.stdout + result.stderr
+    assert handler.connections < TASK_ROWS, (
+        f"{handler.connections} connections for {TASK_ROWS} images: the "
+        "workers are not pooling, whatever DONE.json says")
 
-    recorded = (task_dir / "img2dataset.cmd").read_text()
-    assert "img2dataset_pooled.py" in recorded, recorded
+
+@pytest.mark.parametrize("switch", ["OD_HTTP_POOL", "OD_DNS_CACHE"])
+def test_either_switch_puts_sitecustomize_on_the_workers_path(switch) -> None:
+    """Checked in the script's text, and here is why that is enough.
+
+    The mechanism — PYTHONPATH, sitecustomize, spawned worker — is proven
+    behaviourally twice: `..._pooling_reaches_the_workers_...` measures it at
+    the socket, and test_worker_patches_reach_the_children installs each
+    patch in a real spawned child. What those cannot show is that *this*
+    script turns the mechanism on for *both* switches, because a DNS cache
+    leaves no mark on a server reached at 127.0.0.1 without resolving
+    anything.
+
+    So the junction is checked structurally. Dropping a switch from the
+    condition is the omission this catches.
+    """
+    body = RUNNER.read_text()
+    condition = [line for line in body.splitlines()
+                 if "PYTHONPATH" in line and "export" in line]
+    assert condition, "nothing puts sitecustomize on the workers' path"
+
+    guard = [line for line in body.splitlines()
+             if switch in line and "= \"1\"" in line]
+    assert guard, f"{switch} does not reach the PYTHONPATH guard"
 
 
-def test_the_upstream_downloader_stays_the_default(workspace) -> None:
-    """Off unless asked for. The pooled path is new; the other has fetched
-    every image in the corpus so far."""
+def test_the_upstream_behaviour_stays_the_default(workspace) -> None:
+    """Off unless asked for. Upstream has fetched every image in the corpus
+    so far, and the argv it is given must not change either."""
     plan, task_root = workspace
     result = run_task(plan, task_root)
     assert result.returncode == 0, result.stdout + result.stderr
 
-    recorded = (task_root / "task-000000" / "img2dataset.cmd").read_text()
-    assert "img2dataset_pooled.py" not in recorded, recorded
+    done = json.loads((task_root / "task-000000" / "DONE.json").read_text())
+    assert done["settings"]["http_pool"] == 0
+    assert done["settings"]["dns_cache"] == 0
 
 
 # --------------------------------------------------------------------------
