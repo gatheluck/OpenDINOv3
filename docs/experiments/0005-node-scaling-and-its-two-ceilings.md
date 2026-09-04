@@ -113,6 +113,24 @@ The test that would have caught it counts TCP connections at the far end of
 the wire: with pooling on, sixteen images must cost fewer than sixteen
 connections.
 
+## The resolver ceiling was not ours to spend
+
+On 2026-09-04, with four nodes running and the cache **off**, ABCI asked us
+to stop: our DNS traffic was affecting other users. About 2,300 lookups a
+second, one per image, none reused.
+
+So the 8-node failure was not the first sign of the limit. It was the point
+at which the damage became ours to see rather than someone else's to absorb.
+Four nodes were already too many for a shared resolver, and the yield stayed
+at 64% throughout because the cost was landing on other people.
+
+**A measurement that looks healthy can still be a measurement of harm.** The
+failure mix says what is happening to us. It says nothing about what we are
+doing to the resource we share.
+
+`od.sh dns` now reports queries per second per node from a finished wave, so
+the next conversation with the site can start from a number.
+
 ## What this does not answer
 
 - **Where the ceilings are now.** Both were measured before ABCI's

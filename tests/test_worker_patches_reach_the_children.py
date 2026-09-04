@@ -155,3 +155,78 @@ def test_only_an_explicit_one_turns_it_on(tmp_path, value) -> None:
     default off instead of refusing — but not by accident."""
     seen = child_sees(tmp_path, OD_DNS_CACHE=value)
     assert seen["getaddrinfo"] == "socket"
+
+
+# --------------------------------------------------------------------------
+# The workers have to report what they asked for
+#
+# ABCI stopped a wave because of our DNS traffic. Answering them needs a
+# measurement from a real run, and the only place the counts exist is inside
+# each worker, which is spawned, recycled, and gone by the time the task ends.
+# --------------------------------------------------------------------------
+
+RESOLVING_PROBE = '''
+import socket
+from multiprocessing import get_context
+
+def work(_):
+    for _ in range(5):
+        try:
+            socket.getaddrinfo("localhost", 80)
+        except OSError:
+            pass
+    return True
+
+if __name__ == "__main__":
+    with get_context("spawn").Pool(2) as pool:
+        pool.map(work, [0, 1])
+'''
+
+
+def test_each_worker_reports_its_counts_as_it_exits(tmp_path) -> None:
+    """Measured through a real spawned pool, because that is the only place
+    the counts are ever produced."""
+    from opendinov3.net import dns_report
+
+    probe = tmp_path / "resolving.py"
+    probe.write_text(RESOLVING_PROBE)
+    result = subprocess.run(
+        [sys.executable, str(probe)], capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(SRC), "OD_DNS_CACHE": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    lines = [line for line in result.stderr.splitlines()
+             if dns_report.parse_line(line)]
+    assert len(lines) >= 2, f"a worker exited without reporting: {result.stderr!r}"
+
+    hits = sum(dns_report.parse_line(line)[0] for line in lines)
+    misses = sum(dns_report.parse_line(line)[1] for line in lines)
+
+    # Ten lookups happen — two items of five — but `Pool.map` does not
+    # promise to spread them, so one worker may take both and the other
+    # report zeroes. Asserting one miss per worker fails whenever the pool
+    # schedules that way, which under a loaded suite it does.
+    #
+    # What holds either way: every lookup is counted, the resolver was asked,
+    # and almost all of them were answered without it.
+    assert hits + misses >= 10, (hits, misses)
+    assert misses >= 1, "the resolver was never asked; nothing was measured"
+    assert hits >= 8, (
+        f"{hits} hits from ten lookups of one name: the cache is not being "
+        "used, or its counters are not seeing what the workers do")
+
+
+def test_nothing_is_reported_when_the_cache_is_off(tmp_path) -> None:
+    """A log without these lines means the cache was not running, and the
+    report must be able to tell that from zero queries."""
+    from opendinov3.net import dns_report
+
+    probe = tmp_path / "resolving.py"
+    probe.write_text(RESOLVING_PROBE)
+    result = subprocess.run(
+        [sys.executable, str(probe)], capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(SRC), "OD_DNS_CACHE": "0"})
+
+    assert result.returncode == 0, result.stderr
+    assert not [line for line in result.stderr.splitlines()
+                if dns_report.parse_line(line)]

@@ -269,6 +269,33 @@ shard: a worker takes one shard at a time, and at 575 URL/s per node across
 transient by definition, and caching one would turn a blip into a certainty
 for the whole TTL — at the moment the resolver is already worst.
 
+## Measuring what we ask the resolver — `od.sh dns`
+
+ABCI stopped a wave on 2026-09-04 because our DNS traffic was affecting other
+users. It was running four nodes **without** the cache: roughly 2,300 name
+lookups a second, one per image, none of them reused.
+
+That reframes `OD_DNS_CACHE`. It is not a way to reach eight nodes; it is a
+condition of running at all.
+
+Any figure given to the site has to be measured. `od.sh hosts` predicts 76%
+of lookups repeat, but the cache is per **worker process** and a node runs 32
+of them, so the realised reduction is lower by an amount only a run can say.
+
+```bash
+bash scripts/od.sh dns
+```
+
+Each worker prints its counts as it exits — there is no shared object to read
+afterwards, since workers are spawned and recycled every five shards — and
+the totals are summed out of the tasks' `img2dataset.log`. The reported
+figure is **queries per second per node**, which is what reaches their
+resolver, not our hit rate.
+
+A task whose log carries no counts ran without the cache. That is reported as
+unknown, not zero: zero would be the flattering answer given to the people we
+owe an honest one.
+
 ## How the switches reach the workers
 
 img2dataset's distributor calls `get_context("spawn")`. A spawned worker

@@ -62,8 +62,15 @@ DEFAULT_TTL = 600.0
 #: here so a pathological corpus cannot exhaust the node.
 DEFAULT_MAXSIZE = 100_000
 
+#: How a worker reports its counts as it exits. One definition, because the
+#: totals are parsed back out of the log and two spellings would make them
+#: silently partial.
+REPORT_PREFIX = "OD_DNS_CACHE_STATS"
+
 _lock = threading.Lock()
 _cache: OrderedDict[tuple, tuple] = OrderedDict()
+_hits = 0
+_misses = 0
 _original = None
 _ttl = DEFAULT_TTL
 _maxsize = DEFAULT_MAXSIZE
@@ -74,6 +81,26 @@ def size() -> int:
     """Entries currently held. For tests and for a bounds check."""
     with _lock:
         return len(_cache)
+
+
+def stats() -> tuple[int, int]:
+    """(hits, misses) since install.
+
+    A miss is a question that reached the resolver, which is the quantity the
+    site asked us to reduce. A failed lookup is a miss: it reached them.
+    """
+    with _lock:
+        return _hits, _misses
+
+
+def report_line(hits: int, misses: int) -> str:
+    """The line a worker prints as it exits, and the only place its shape is
+    written down."""
+    return f"{REPORT_PREFIX} hits={hits} misses={misses}"
+
+
+def report() -> str:
+    return report_line(*stats())
 
 
 def _lookup(host, port, family=0, type=0, proto=0, flags=0):  # noqa: A002
@@ -91,8 +118,12 @@ def _lookup(host, port, family=0, type=0, proto=0, flags=0):  # noqa: A002
             expires, value = entry
             if expires > now:
                 _cache.move_to_end(key)
+                global _hits          # noqa: PLW0603
+                _hits += 1
                 return value
             del _cache[key]
+        global _misses                # noqa: PLW0603
+        _misses += 1
 
     # Resolved outside the lock: a slow or hanging resolver must not stop
     # the other 31 threads from being served out of the cache.
@@ -115,10 +146,11 @@ def install(ttl: float = DEFAULT_TTL, maxsize: int = DEFAULT_MAXSIZE,
     path. Installing twice is a no-op rather than a second layer: stacked
     wrappers would double-count and leave one behind on uninstall.
     """
-    global _original, _ttl, _maxsize, _clock  # noqa: PLW0603
+    global _original, _ttl, _maxsize, _clock, _hits, _misses  # noqa: PLW0603
     _ttl, _maxsize, _clock = ttl, maxsize, clock
     with _lock:
         _cache.clear()
+        _hits = _misses = 0
     if _original is not None:
         return
     _original = socket.getaddrinfo
