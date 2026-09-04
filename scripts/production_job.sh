@@ -108,6 +108,8 @@ singularity exec \
   --env "OD_RETRIES=${OD_RETRIES:-2}" \
   --env "OD_MAX_URLS=${OD_MAX_URLS:-0}" \
   --env "OD_HTTP_POOL=${OD_HTTP_POOL:-0}" \
+  --env "OD_DNS_CACHE=${OD_DNS_CACHE:-0}" \
+  --env "OD_DNS_CACHE_TTL=${OD_DNS_CACHE_TTL:-}" \
   "${OD_SIF}" bash /work/scripts/production_task.sh
 rc=$?
 
