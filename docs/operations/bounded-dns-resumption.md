@@ -231,3 +231,65 @@ information and a tested whole-transfer deadline, preserving DNS pacing,
 face blurring, retry accounting and completed-shard reuse. Such code changes
 need TDD, regression checks and a separate implementation PR; this investigation
 alone is not evidence that a fix has been deployed or the task recovered.
+
+## HTTP body deadline correction: 2026-10-04
+
+A regression test now requires a response trickling bytes every 0.1 seconds
+with timeout 0.4 seconds to fail promptly, and verifies that a subsequent normal
+request succeeds. RED: the old downloader returned a successful stream instead.
+A second RED exposed a compressed-response edge case: a slowly delivered gzip
+filename kept urllib3's decoding read loop inside one call for 2.916 seconds.
+
+The correction reads raw body chunks and checks a monotonic budget before and
+after each read, then decodes the completed in-memory response. Incomplete
+responses close their connection; empty error responses retain reuse. Ordinary
+compressed bodies still decode correctly. This budget includes elapsed time
+since the request began but is enforced at body-read boundaries. It is not a
+hard deadline for DNS, TLS, response headers, CPU decoding, or a blocked system
+call; existing socket timeouts still govern individual blocking reads. Do not
+claim it guarantees that every request finishes in exactly `OD_TIMEOUT` seconds.
+It fixes the reproduced body-trickle failure mode, not a proven diagnosis of
+task 173's worker state. Decoding after collection adds memory overhead for
+compressed bodies; no new image-size filtering is introduced.
+
+Production rollout must use the reviewed merged commit and its published image.
+Preserve the running jobs that are making progress. For task 173, retain the
+99 completed shards and the failed-attempt logs, confirm its old job has exited
+before one replacement is submitted, and enable account-only compute SSH for
+diagnostics on the replacement. Keep the reserved queue, four-node cap,
+`OD_DNS_BUDGET=1`, face blurring and group-area TMPDIR. Inspect actual worker
+state if the replacement stalls; do not cycle retries based on age alone.
+
+Validation: HTTP/DNS/production task/submission regression tests passed
+**117 tests** (96.23 seconds, one existing dependency deprecation warning).
+The command was `python -m pytest -o addopts='' tests/test_pooled_download.py
+ tests/test_dns_budget.py tests/test_production_task.py
+ tests/test_production_cli.py -q` inside the dependency container. Do not set a
+global PYTHONPATH for this suite: doing so activates sitecustomize in helper
+processes and caused two environment-induced failures in the first run.
+Disabling the deadline in an isolated source/test copy made both new deadline
+tests fail (2 failures, 7.73 seconds). An earlier mutation attempt accidentally
+selected the original source via conftest and is not counted as validation.
+Ruff checks cover the changed module and tests; identifier and diff checks pass.
+`ty` reports an existing dynamic monkeypatch assignment diagnostic, reproduced
+unchanged on the main-branch module; it is not suppressed or claimed green.
+
+### CI follow-up and first completed attempt
+
+The initial PR CI run passed 659 tests but failed the worker-exit DNS reporting
+test: concurrent `print` calls interleaved a report and its newline. A new
+controlled competing-writer test reproduced the malformed record (RED). Sending
+the short report plus newline in one `os.write` fixes the interleaving; all 13
+worker-patch tests pass. This fixes the observed race instead of weakening the
+parser or rerunning CI until lucky. This reporting path is for the legacy DNS
+cache, which remains disabled in the current bounded-DNS production jobs.
+
+Task 346 finished downloading with exit 1 at the unchanged health gate:
+1,000,000 candidates, 496,623 successes, DNS fraction 28.2766%. Separating by
+this attempt's start time shows 77 reused shards (770,000 candidates, 352,269
+successes, 267,945 DNS failures) and 23 newly written shards (230,000 candidates,
+144,354 successes, 14,821 DNS failures). The new portion's DNS fraction is
+6.444%, versus 34.798% in the reused portion. Aggregate rejection is therefore
+dominated by old DNS-degraded shards. Keep this task incomplete; do not lower
+the gate or blindly retry the identical reuse plan. Preserve good shards while
+investigating targeted recovery of the degraded portion.

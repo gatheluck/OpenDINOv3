@@ -33,6 +33,7 @@ evading a control that is theirs to set.
 
 from __future__ import annotations
 
+import gzip
 import io
 import threading
 import time
@@ -68,7 +69,21 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.startswith("/forbidden"):
+        if self.path.startswith("/gzip-drip"):
+            # A long gzip filename delays decoded output despite incoming bytes.
+            data = gzip.compress(JPEG)
+            data = data[:3] + b"\x08" + data[4:10] + b"x" * 30 + b"\x00" + data[10:]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Encoding", "gzip")
+            self.end_headers()
+            for byte in data:
+                self.wfile.write(bytes([byte]))
+                self.wfile.flush()
+                time.sleep(0.05)
+        elif self.path.startswith("/gzip"):
+            self._send(200, gzip.compress(JPEG), [("Content-Encoding", "gzip")])
+        elif self.path.startswith("/forbidden"):
             self._send(403)
         elif self.path.startswith("/robots"):
             self._send(200, JPEG, [("X-Robots-Tag", "noai")])
@@ -76,6 +91,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(302, b"", [("Location", "/ok0.jpg")])
         elif self.path.startswith("/boom"):
             self._send(500)
+        elif self.path.startswith("/drip"):
+            self.send_response(200)
+            self.send_header("Content-Length", "30")
+            self.end_headers()
+            for _ in range(30):
+                self.wfile.write(b"x")
+                self.wfile.flush()
+                time.sleep(0.1)
         elif self.path.startswith("/slow"):
             # Longer than any timeout the tests ask for, so the timeout case
             # is deterministic. A tiny timeout against loopback is not: the
@@ -156,6 +179,7 @@ def test_images_from_one_host_share_a_connection(server) -> None:
         _, stream, err = fetch(f"{base}/ok{i}.jpg")
         assert err is None, err
         assert stream is not None
+        assert stream is not None
 
     # Measured at 1 for fifty sequential images on one host. Two allows for a
     # single reconnect; anything looser would pass on barely any reuse at all,
@@ -177,6 +201,7 @@ def test_a_failed_url_does_not_cost_the_host_its_connection(server) -> None:
         fetch(f"{base}/forbidden{i}.jpg")
         _, stream, err = fetch(f"{base}/ok{i}.jpg")
         assert err is None, err
+        assert stream is not None
 
     assert handler.connections <= 2, (
         f"{handler.connections} connections for 20 fetches: failures are "
@@ -307,3 +332,33 @@ def test_installing_replaces_the_downloader_img2dataset_calls() -> None:
         assert dl.download_image is pd.download_image
     finally:
         dl.download_image = original
+
+
+def test_slow_body_exceeds_transfer_budget_and_next_request_works(server):
+    base, _ = server
+    start = time.monotonic()
+    _, stream, err = fetch(f"{base}/drip", timeout=0.4)
+    elapsed = time.monotonic() - start
+    assert stream is None
+    assert "timed out" in err.lower()
+    assert elapsed < 1.5
+    _, stream, err = fetch(f"{base}/ok.jpg")
+    assert err is None
+    assert stream.getvalue() == JPEG
+
+
+def test_gzip_header_trickle_cannot_hide_transfer_deadline(server):
+    base, _ = server
+    start = time.monotonic()
+    _, stream, err = fetch(f"{base}/gzip-drip", timeout=0.4)
+    elapsed = time.monotonic() - start
+    assert stream is None
+    assert "timed out" in err.lower()
+    assert elapsed < 1.5
+
+
+def test_compressed_body_still_decodes(server):
+    base, _ = server
+    _, stream, err = fetch(f"{base}/gzip")
+    assert err is None
+    assert stream.getvalue() == JPEG

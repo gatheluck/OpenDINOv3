@@ -77,7 +77,10 @@ def _install_dns_cache() -> None:
     # This exists because ABCI asked us to stop: any claim about how much we
     # affected API calls needs observations. These exit logs can be lost
     # on forced termination and do not measure wire DNS traffic.
-    atexit.register(lambda: print(dns_cache.report(), file=sys.stderr))
+    # One short write keeps the record and newline together across workers.
+    atexit.register(lambda: os.write(
+        sys.stderr.fileno(), (dns_cache.report() + "\n").encode()
+    ))
 
 
 def _install_connection_pool() -> None:
