@@ -166,10 +166,15 @@ def test_only_an_explicit_one_turns_it_on(tmp_path, value) -> None:
 # --------------------------------------------------------------------------
 
 RESOLVING_PROBE = '''
+import atexit
+import time
 import socket
 from multiprocessing import get_context
 
 def work(_):
+    # Make exit cleanup overlap with the parent's shutdown. Abrupt Pool
+    # termination must not accidentally masquerade as graceful worker exit.
+    atexit.register(time.sleep, 0.2)
     for _ in range(5):
         try:
             socket.getaddrinfo("localhost", 80)
@@ -178,8 +183,14 @@ def work(_):
     return True
 
 if __name__ == "__main__":
-    with get_context("spawn").Pool(2) as pool:
+    # Pool.__exit__ terminates workers; atexit reporting requires normal exit.
+    pool = get_context("spawn").Pool(2)
+    try:
         pool.map(work, [0, 1])
+        pool.close()
+        pool.join()
+    finally:
+        pool.terminate()
 '''
 
 

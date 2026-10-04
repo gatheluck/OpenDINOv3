@@ -339,3 +339,21 @@ PR #57 was subsequently merged as `d1c97e283fec084599c34f934873b6ec7b452866`.
 PR #58 retains both the HTTP correction/validation record and the full-task
 completion record. This documentation merge does not establish deployment of
 the correction or recovery of task 173.
+
+### PR #58 CI correction: graceful reporting probe shutdown
+
+After resolving the documentation merge, CI failed with 660 passing tests and
+one worker-statistics failure: reported hits and misses both summed to zero.
+This was distinct from the previously fixed line-interleaving race. The probe
+used a Pool context manager, whose exit terminates workers rather than waiting
+for their Python exit callbacks. Atomic output cannot preserve a callback that
+never executes.
+
+RED: registering a 0.2-second exit cleanup in the workers reproduced the same
+`(0, 0)` failure locally. GREEN: explicitly close and join the test pool before
+cleanup, retaining all count/cache assertions and the delayed exit. This tests
+graceful reporting rather than relying on scheduling luck. It does not change
+production shutdown or promise that DNS statistics survive forced termination;
+current production continues to use `OD_DNS_CACHE=0` and `OD_DNS_BUDGET=1`.
+Conflict resolution alone was not proof of CI success. The latest head must
+pass the complete CI workflow before this PR is reported ready.
