@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from opendinov3.core.dns_measurement import measure
+from opendinov3.platform.dns_measurement import measure
 
 
 def main():

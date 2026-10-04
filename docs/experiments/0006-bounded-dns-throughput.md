@@ -107,3 +107,9 @@ counted; the complete-copy rerun established the behavioral failure. Ruff and
 ty passed for the new collector/CLI (Ruff also covers the new tests). Full CI
 is required before deployment. This document is an experiment registration,
 not a claim that ABCI throughput has already improved.
+
+The initial full CI run passed 672 tests but failed the architectural invariant:
+subprocess execution cannot live in core. The collector now lives in the
+platform adapter package; the architectural check is unchanged.
+Focused verification after relocation: 57 architecture, measurement and DNS
+transport tests passed in 2.85 seconds; Ruff, ty and identifier checks passed.

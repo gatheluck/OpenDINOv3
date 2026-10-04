@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from opendinov3.core.dns_measurement import measure
+from opendinov3.platform.dns_measurement import measure
 
 
 @pytest.mark.parametrize('exit_code', [0, 7])
