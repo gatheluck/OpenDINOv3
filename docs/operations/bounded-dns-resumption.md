@@ -273,3 +273,23 @@ selected the original source via conftest and is not counted as validation.
 Ruff checks cover the changed module and tests; identifier and diff checks pass.
 `ty` reports an existing dynamic monkeypatch assignment diagnostic, reproduced
 unchanged on the main-branch module; it is not suppressed or claimed green.
+
+### CI follow-up and first completed attempt
+
+The initial PR CI run passed 659 tests but failed the worker-exit DNS reporting
+test: concurrent `print` calls interleaved a report and its newline. A new
+controlled competing-writer test reproduced the malformed record (RED). Sending
+the short report plus newline in one `os.write` fixes the interleaving; all 13
+worker-patch tests pass. This fixes the observed race instead of weakening the
+parser or rerunning CI until lucky. This reporting path is for the legacy DNS
+cache, which remains disabled in the current bounded-DNS production jobs.
+
+Task 346 finished downloading with exit 1 at the unchanged health gate:
+1,000,000 candidates, 496,623 successes, DNS fraction 28.2766%. Separating by
+this attempt's start time shows 77 reused shards (770,000 candidates, 352,269
+successes, 267,945 DNS failures) and 23 newly written shards (230,000 candidates,
+144,354 successes, 14,821 DNS failures). The new portion's DNS fraction is
+6.444%, versus 34.798% in the reused portion. Aggregate rejection is therefore
+dominated by old DNS-degraded shards. Keep this task incomplete; do not lower
+the gate or blindly retry the identical reuse plan. Preserve good shards while
+investigating targeted recovery of the degraded portion.

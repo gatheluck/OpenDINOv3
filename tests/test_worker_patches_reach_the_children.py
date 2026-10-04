@@ -229,3 +229,42 @@ def test_nothing_is_reported_when_the_cache_is_off(tmp_path) -> None:
     assert result.returncode == 0, result.stderr
     assert not [line for line in result.stderr.splitlines()
                 if dns_report.parse_line(line)]
+
+
+def test_exit_report_stays_parseable_when_another_writer_runs(monkeypatch):
+    import atexit
+    import runpy
+
+    from opendinov3.net import dns_cache, dns_report
+
+    for name in ("OD_DNS_CACHE", "OD_DNS_BUDGET", "OD_HTTP_POOL"):
+        monkeypatch.setenv(name, "0")
+    callbacks = []
+    monkeypatch.setattr(atexit, "register", callbacks.append)
+    monkeypatch.setattr(dns_cache, "install", lambda **kwargs: None)
+    monkeypatch.setattr(dns_cache, "report", lambda: "OD_DNS_CACHE_STATS hits=9 misses=1")
+    scope = runpy.run_path(str(SRC / "sitecustomize.py"))
+    scope["_install_dns_cache"]()
+    read_fd, write_fd = os.pipe()
+
+    class CompetingWriter:
+        def fileno(self):
+            return write_fd
+
+        def write(self, text):
+            os.write(write_fd, text.encode())
+            os.write(write_fd, b"another worker\n")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "stderr", CompetingWriter())
+            callbacks[0]()
+        os.close(write_fd)
+        write_fd = None
+        output = os.read(read_fd, 4096).decode()
+        reports = [dns_report.parse_line(line) for line in output.splitlines()]
+        assert (9, 1) in reports, output
+    finally:
+        os.close(read_fd)
+        if write_fd is not None:
+            os.close(write_fd)
