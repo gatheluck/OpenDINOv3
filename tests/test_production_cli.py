@@ -681,3 +681,21 @@ def test_a_setting_given_to_the_job_arrives_with_its_value(tmp_path) -> None:
     _, dumped = run_job(tmp_path, OD_CARRY_COLUMNS="uid sha256")
 
     assert "OD_CARRY_COLUMNS=uid sha256" in dumped, dumped
+
+
+def test_dns_budget_is_forwarded_by_actual_job(tmp_path):
+    result, dumped = run_job(tmp_path, OD_DNS_BUDGET='1')
+    assert result.returncode == 0, result.stderr
+    pairs = dict(line.split('=', 1) for line in dumped.split('---')[0].splitlines())
+    assert pairs.get('OD_DNS_BUDGET') == '1'
+    assert pairs.get('OD_DNS_BUDGET_FILE') == '/dns-budget/budget.json'
+
+
+def test_dns_budget_is_baked_into_submission(tmp_path):
+    env = make_env(tmp_path)
+    env['OD_DNS_BUDGET'] = '1'
+    result = submit(env, '--from', 0, '--to', 0, '--dry-run')
+    assert result.returncode == 0, result.stderr
+    job = Path(env['OD_LOGDIR']) / 'production_job.generated.sh'
+    result = subprocess.run(['bash', '-c', job.read_text().split('set -uo pipefail')[0] + '\nprintf "%s" "$OD_DNS_BUDGET"'], capture_output=True, text=True, env={}, check=False)
+    assert result.stdout == '1'

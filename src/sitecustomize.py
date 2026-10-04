@@ -20,7 +20,10 @@ Python imports `sitecustomize` at interpreter startup from anything on
 directory on `PYTHONPATH` for img2dataset and its children only, so no other
 process in the job pays for it.
 
-WHY IT CANNOT RAISE
+OPTIONAL TUNING VERSUS REQUIRED DNS CONTROL
+
+Required DNS budgeting fails closed with exit 78 if installation fails.
+Optional cache/pooling tuning retains the historical fallback below.
 
 This runs before the interpreter is fully up. An exception here does not
 degrade one download, it kills every worker in the wave. So each step is
@@ -84,6 +87,17 @@ def _install_connection_pool() -> None:
 
 
 def _main() -> None:
+    if os.environ.get("OD_DNS_BUDGET", "0") != "0":
+        try:
+            if os.environ["OD_DNS_BUDGET"] != "1":
+                raise ValueError("OD_DNS_BUDGET must be 0 or 1")
+            from opendinov3.net import dns_budget
+
+            dns_budget.install(os.environ["OD_DNS_BUDGET_FILE"])
+        except Exception as err:  # noqa: BLE001 — fail closed for any startup failure
+            _warn(f"required DNS budget failed ({err!r}); refusing network work")
+            sys.stderr.flush()
+            os._exit(78)
     for variable, install in (("OD_DNS_CACHE", _install_dns_cache),
                               ("OD_HTTP_POOL", _install_connection_pool)):
         if not _enabled(variable):
