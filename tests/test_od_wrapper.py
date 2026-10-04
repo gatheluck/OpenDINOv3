@@ -222,9 +222,20 @@ def test_hosts_reaches_the_metadata_and_uses_the_shard_size(env) -> None:
     assert "host_concentration.json" in result.stdout
 
 
+def test_dns_reaches_our_own_task_root(env) -> None:
+    """The counts live in the logs of tasks we produced, not the
+    predecessor's."""
+    result = run(env, "--dry-run", "dns")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "dns_report.py" in result.stdout
+    assert "/out/datacomp/datacomp_1b/raw_shards" in result.stdout
+    assert "dns_report.json" in result.stdout
+
+
 @pytest.mark.parametrize("name", [
-    "inspect", "resolution", "hosts", "verify", "plan", "report", "slow",
-    "submit",
+    "inspect", "resolution", "hosts", "dns", "verify", "plan", "report",
+    "slow", "submit",
 ])
 def test_every_advertised_subcommand_is_dispatchable(env, name) -> None:
     """The usage text and the dispatcher must not drift apart. `slow` was

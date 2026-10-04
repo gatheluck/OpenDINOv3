@@ -251,8 +251,8 @@ throughput figure cannot be attributed without it.
 
 Scaling from 4 nodes to 8 did not run out of connections. `unreachable`
 stayed at 0.1%; **DNS failures went from 6.2% to 76.6%** and yield from
-64.0% to 17.4%. Eight nodes ask the shared resolver for about 4,600 names a
-second.
+64.0% to 17.4%. The historical estimate of 4,600 lookups/s at eight nodes was derived
+from throughput, not a direct DNS measurement.
 
 `OD_DNS_CACHE=1` caches successful lookups in each worker process.
 `od.sh hosts` measured 500,000 URLs across 118,834 hosts, so 76% of lookups
@@ -268,6 +268,57 @@ shard: a worker takes one shard at a time, and at 575 URL/s per node across
 **Failures are never cached.** Under a saturated resolver a failure is
 transient by definition, and caching one would turn a blip into a certainty
 for the whole TTL — at the moment the resolver is already worst.
+
+## Observing name-resolution API calls — `od.sh dns`
+
+ABCI stopped a wave on 2026-09-04 because our DNS traffic was affecting other
+users. Four nodes were running without the cache. The contemporary estimate
+of roughly 2,300 lookups/s came from image throughput, not wire DNS measurement.
+A healthy download yield did not establish that our shared-resource use was safe.
+
+```bash
+bash scripts/od.sh dns
+```
+
+The command reads the 20 most recently modified task directories by default
+(`--tasks N` changes this), including unfinished tasks, and writes
+`production/dns_report.json`. Each cache-enabled process emits counters at
+exit; the report sums the available lines from `img2dataset.log`.
+
+The measured quantity is **calls to the original `getaddrinfo` after an
+application-cache miss**, including failed calls. It is not DNS queries on
+the wire: OS caches, local name sources, A/AAAA lookups and retries can make
+the two counts differ. The cache-hit fraction also describes only the
+observed API calls, not a measured reduction in network DNS traffic.
+
+- `measurement_status: unknown`: no counters are available. The cache may
+  have been off, but old/lost logs or forced termination are also possible.
+  Counts and rates are JSON `null`, not zero. JSON is written even when all
+  tasks are unknown, so an old result is not silently retained.
+- `measurement_status: partial`: some counters were observed, but complete
+  process coverage cannot be verified. This applies even with `DONE.json`;
+  a successful task does not prove that every process emitted its report.
+- `observed_resolver_calls_per_second`: observed calls divided by the
+  task's positive integer `wall_seconds`. Missing/invalid duration produces
+  `null`. It is a **task-wall-time average of observed counts**, not an
+  instantaneous or peak per-node rate. Unknown tasks are retained, and no
+  extrapolated cluster-wide QPS or hypothetical no-cache QPS is reported.
+
+A task still running can change while it is read; this is a diagnostic of
+available logs, not an atomic live snapshot. Forced termination can lose
+some or all counters. The parent and recycled workers can all emit lines,
+so `reports` counts log records, not distinct download workers.
+
+**This command cannot establish compliance with a DNS QPS limit and does
+not enforce one.** Wire-level measurement, an agreed measurement window and
+node-wide rate control remain separate work. Enabling the cache alone does
+not authorise restarting a stopped wave or widening one. Check the current
+site/team operating guidance before either action.
+
+2026-10-04 correction: the earlier PR described these counters as queries
+reaching the site's resolver and interpreted missing logs as cache disabled.
+Both claims exceeded what the instrumentation can observe; the diagnostic
+now explicitly reports partial API-call observations instead.
 
 ## How the switches reach the workers
 

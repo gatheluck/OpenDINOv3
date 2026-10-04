@@ -52,6 +52,8 @@ def _warn(message: str) -> None:
 
 
 def _install_dns_cache() -> None:
+    import atexit
+
     from opendinov3.net import dns_cache
 
     ttl = dns_cache.DEFAULT_TTL
@@ -63,6 +65,16 @@ def _install_dns_cache() -> None:
             _warn(f"OD_DNS_CACHE_TTL={raw!r} is not a number; "
                   f"using the default {dns_cache.DEFAULT_TTL:.0f}s")
     dns_cache.install(ttl=ttl)
+
+    # Each worker reports its own counts as it exits. There is no shared
+    # object to read at the end — workers are spawned and recycled every five
+    # shards — so the totals are the sum of these lines, which land in the
+    # task's img2dataset.log. `od.sh dns` adds them up.
+    #
+    # This exists because ABCI asked us to stop: any claim about how much we
+    # affected API calls needs observations. These exit logs can be lost
+    # on forced termination and do not measure wire DNS traffic.
+    atexit.register(lambda: print(dns_cache.report(), file=sys.stderr))
 
 
 def _install_connection_pool() -> None:

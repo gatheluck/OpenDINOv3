@@ -31,6 +31,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   inspect            what the upstream metadata schema holds
   resolution         how large the images are, before downloading any
   hosts              how much connection reuse this corpus would allow
+  dns                observed name-resolution API calls and cache effectiveness
   verify             does what arrived match what the metadata claimed
   submit --from N --to M   send one production wave to the queue
   report             does the pilot justify widening the wave
@@ -167,6 +168,12 @@ case "${SUBCOMMAND}" in
     run python /work/scripts/measure_host_concentration.py "${META_IN}" \
       --window "${OD_SAMPLES_PER_SHARD:-10000}" \
       --json "${PROD_IN}/host_concentration.json" "$@"
+    ;;
+  dns)
+    resolve TASKS_IN "${TASK_ROOT}"
+    resolve PROD_IN "${PRODUCTION}"
+    run python /work/scripts/dns_report.py "${TASKS_IN}" \
+      --json "${PROD_IN}/dns_report.json" "$@"
     ;;
   verify)
     resolve SHARDS_IN \
