@@ -113,3 +113,6 @@ wandb==0.28.2
     # via img2dataset
 webdataset==0.2.111
     # via img2dataset
+
+dnspython==2.8.0
+    # via -r requirements.in

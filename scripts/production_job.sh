@@ -88,6 +88,15 @@ if [ -z "${OD_META_ROOT:-}" ]; then
   exit 1
 fi
 
+# Shared by this user's jobs on this compute node, not by job ID. Never
+# delete/reset this directory while another worker may be using the lock.
+DNS_BINDS=()
+if [ "${OD_DNS_BUDGET:-0}" != "0" ]; then
+  DNS_DIR="/tmp/opendinov3-dns-${UID}"
+  mkdir -p -m 700 "${DNS_DIR}" || exit 78
+  DNS_BINDS=(--bind "${DNS_DIR}:/dns-budget")
+fi
+
 # The last three are passed through empty rather than with a default:
 # production_task.sh already defines what each falls back to, and repeating
 # it here is a second copy to drift. `:-` treats empty as unset.
@@ -95,7 +104,7 @@ fi
 # No comments inside the continuation below. A `#` on a continued line ends
 # the command and runs the remainder as a separate one — `bash -n` accepts
 # it, and the SIF path silently disappears.
-singularity exec \
+singularity exec "${DNS_BINDS[@]}" \
   --bind "${OD_REPO}:/work:ro" \
   --bind "${PLAN_DIR}:/plan:ro" \
   --bind "${OD_META_ROOT}:${OD_META_ROOT}:ro" \
@@ -115,6 +124,8 @@ singularity exec \
   --env "OD_RETRIES=${OD_RETRIES:-2}" \
   --env "OD_MAX_URLS=${OD_MAX_URLS:-0}" \
   --env "OD_HTTP_POOL=${OD_HTTP_POOL:-0}" \
+  --env "OD_DNS_BUDGET=${OD_DNS_BUDGET:-0}" \
+  --env "OD_DNS_BUDGET_FILE=/dns-budget/budget.json" \
   --env "OD_DNS_CACHE=${OD_DNS_CACHE:-0}" \
   --env "OD_DNS_CACHE_TTL=${OD_DNS_CACHE_TTL:-}" \
   --env "OD_CARRY_COLUMNS=${OD_CARRY_COLUMNS:-}" \

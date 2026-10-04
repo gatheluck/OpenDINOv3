@@ -870,3 +870,23 @@ def test_relaions_caption_and_identifier_survive_the_case_change(
         assert dropped not in names, f"{dropped} was carried: {names}"
     # img2dataset writes the real decoded size itself, exactly once.
     assert names.count("width") == 1, names
+
+
+def test_required_dns_budget_cannot_silently_download_without_control(workspace, tmp_path):
+    plan, task_root = workspace
+    result = run_task(plan, task_root, OD_DNS_BUDGET='1',
+                      OD_DNS_BUDGET_FILE=str(tmp_path/'missing'/'budget'))
+    assert result.returncode != 0
+    assert not (task_root/'task-000000'/'DONE.json').exists()
+    log = (task_root/'task-000000'/'img2dataset.log').read_text()
+    assert 'required DNS budget failed' in log
+
+
+def test_controlled_download_succeeds_and_records_budget(workspace, tmp_path):
+    plan, task_root = workspace
+    result = run_task(plan, task_root, OD_DNS_BUDGET='1',
+                      OD_DNS_BUDGET_FILE=str(tmp_path/'budget'))
+    assert result.returncode == 0, result.stdout + result.stderr
+    done = json.loads((task_root/'task-000000'/'DONE.json').read_text())
+    assert done['successes'] == TASK_ROWS
+    assert done['settings'].get('dns_budget') == 1

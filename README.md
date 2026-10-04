@@ -127,3 +127,7 @@ Further directories are added as the pipeline is implemented.
 ## License
 
 TBD.
+
+## Acquisition operations
+
+See the [2026-10-04 DataComp restart audit and DNS control log](docs/operations/bounded-dns-resumption.md) before restarting acquisition.

@@ -330,7 +330,7 @@ IMG2DATASET_ARGS=(
 #   OD_HTTP_POOL  20 nodes exhausted connections — `unreachable` 35.3%
 #   OD_DNS_CACHE   8 nodes exhausted the resolver — DNS 76.6%, yield 17.4%
 # Both off by default; upstream behaviour has fetched every image so far.
-if [ "${OD_HTTP_POOL:-0}" = "1" ] || [ "${OD_DNS_CACHE:-0}" = "1" ]; then
+if [ "${OD_HTTP_POOL:-0}" = "1" ] || [ "${OD_DNS_CACHE:-0}" = "1" ] || [ "${OD_DNS_BUDGET:-0}" != "0" ]; then
   export PYTHONPATH="${REPO}/src${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
@@ -363,10 +363,10 @@ fi
 python - "${TASK_DIR}" "${OD_TASK_ID}" "$((t1 - t0))" \
         "${PROCESSES}" "${THREADS}" "${SAMPLES_PER_SHARD}" \
         "${TIMEOUT}" "${RETRIES}" "${PLANNED_URLS}" \
-        "${OD_HTTP_POOL:-0}" "${OD_DNS_CACHE:-0}" <<'PY'
+        "${OD_HTTP_POOL:-0}" "${OD_DNS_CACHE:-0}" "${OD_DNS_BUDGET:-0}" <<'PY'
 import json, sys, datetime, pathlib
 (task_dir, task_id, wall, procs, threads, sps, timeout, retries,
- planned, http_pool, dns_cache) = sys.argv[1:12]
+ planned, http_pool, dns_cache, dns_budget) = sys.argv[1:13]
 health = json.loads((pathlib.Path(task_dir) / "health.json").read_text())
 (pathlib.Path(task_dir) / "DONE.json").write_text(json.dumps({
     "task_id": int(task_id),
@@ -387,7 +387,8 @@ health = json.loads((pathlib.Path(task_dir) / "health.json").read_text())
                  # Which network tuning was active. The argv is identical
                  # either way, so this is the only record of it — and a
                  # throughput figure cannot be attributed without it.
-                 "http_pool": int(http_pool), "dns_cache": int(dns_cache)},
+                 "http_pool": int(http_pool), "dns_cache": int(dns_cache),
+                 "dns_budget": int(dns_budget)},
 }, indent=1))
 PY
 

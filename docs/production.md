@@ -1,7 +1,12 @@
 # Production run: acquiring DataComp-1B
 
-Status: implemented, not yet started
-Date: 2026-08-14
+Historical baseline: 2026-08-14 (retained for provenance).
+
+2026-10-04 update: acquisition has run; see the
+[bounded-DNS resumption audit and work log](operations/bounded-dns-resumption.md)
+for current progress, the four-node cap and required DNS controls. The old
+throughput/storage estimates and 32×32 setting below are not restart approval
+or predictions for the rate-limited path.
 
 ## What is being built
 

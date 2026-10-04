@@ -265,6 +265,10 @@ JOB="${OD_LOGDIR}/production_job.generated.sh"
   # Optional, so it carries its default rather than being required: unset
   # means the upstream downloader, which is what every wave so far used.
   echo "export OD_HTTP_POOL=$(printf '%q' "${OD_HTTP_POOL:-0}")"
+  echo "export OD_MAX_URLS=$(printf '%q' "${OD_MAX_URLS:-0}")"
+  echo "export OD_RETRIES=$(printf '%q' "${OD_RETRIES:-2}")"
+  echo "export OD_TIMEOUT=$(printf '%q' "${OD_TIMEOUT:-10}")"
+  echo "export OD_DNS_BUDGET=$(printf '%q' "${OD_DNS_BUDGET:-0}")"
   echo "export OD_DNS_CACHE=$(printf '%q' "${OD_DNS_CACHE:-0}")"
   echo
   # The body is production_job.sh unless an experiment substitutes its own.

@@ -19,3 +19,6 @@ pillow
 # Test runner. Kept in the runtime image on purpose so the image can verify
 # itself, both in CI and on the cluster before a production run.
 pytest==8.4.2
+
+# Public resolver override and transport socket factory, pinned for pacing.
+dnspython==2.8.0
