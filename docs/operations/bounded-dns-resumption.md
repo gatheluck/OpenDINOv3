@@ -231,3 +231,42 @@ information and a tested whole-transfer deadline, preserving DNS pacing,
 face blurring, retry accounting and completed-shard reuse. Such code changes
 need TDD, regression checks and a separate implementation PR; this investigation
 alone is not evidence that a fix has been deployed or the task recovered.
+
+## First verified full completion: 2026-10-04 12:20 UTC
+
+Task 348 completed with PBS exit 0 after 3:20:41. Its DONE marker matches task
+348 and the full 1,000,000 planned candidates, has `partial=false`, records
+551,287 successes and `settings.dns_budget=1`. The unchanged health gate passed:
+yield 55.1287%, DNS fraction 19.2802%, unreachable fraction 0.1581%, 100 shards.
+These totals include reused shards; they are not all newly downloaded records.
+
+Tasks 346 and 347 completed their download passes but exited 1 at the health
+gate, without DONE markers. Separating stats by the new attempt's start time:
+
+| Task | Portion | Candidates | Successes | DNS failures |
+|---|---|---:|---:|---:|
+| 346 | reused | 770,000 | 352,269 | 267,945 |
+| 346 | newly written | 230,000 | 144,354 | 14,821 |
+| 347 | reused | 690,000 | 309,795 | 248,474 |
+| 347 | newly written | 310,000 | 194,967 | 19,875 |
+
+The approximately 6.4% DNS fractions in the new portions contrast with the
+much worse reused portions. Do not lower the health gate or retry the same
+reuse plan indefinitely. Keep good shards and investigate targeted recovery
+of DNS-degraded history. Neither failed task is counted as completed.
+
+Task 173 remained running with unchanged output; the HTTP body correction is
+in PR #57, whose updated CI passed. Merge approval is still pending; do not
+interpret a scheduled heartbeat as approval. Task 379 was submitted after
+346 ended. Fresh quota and scheduler checks before filling the next two slots
+showed 1,181 / 10,000 TiB, 168,386,103 / 600,000,000 files and two active account
+jobs. Tasks 380 and 381 were selected as unfinished and unlocked, keeping the
+acquisition cap at four including queued jobs. Private job identities and
+submission events remain in the run directory.
+
+A diagnostic SSH option attempted for task 379 was rejected before job creation:
+a second qsub `-v` replaced the wrapper's required RTYPE. Scheduler inspection
+confirmed no new job. The subsequent submission used the existing working
+arguments without SSH. Diagnostic SSH for task 173's eventual recovery requires
+combining environment variables correctly through a tested wrapper change;
+adding another `-v` is not a valid recovery procedure.
