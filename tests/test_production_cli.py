@@ -699,3 +699,14 @@ def test_dns_budget_is_baked_into_submission(tmp_path):
     job = Path(env['OD_LOGDIR']) / 'production_job.generated.sh'
     result = subprocess.run(['bash', '-c', job.read_text().split('set -uo pipefail')[0] + '\nprintf "%s" "$OD_DNS_BUDGET"'], capture_output=True, text=True, env={}, check=False)
     assert result.stdout == '1'
+
+
+@pytest.mark.parametrize(('variable', 'value'), [('OD_MAX_URLS', '1000'), ('OD_RETRIES', '0'), ('OD_TIMEOUT', '12')])
+def test_canary_bounds_survive_submission(tmp_path, variable, value):
+    env = make_env(tmp_path)
+    env[variable] = value
+    result = submit(env, '--from', 0, '--to', 0, '--dry-run')
+    assert result.returncode == 0, result.stderr
+    job = Path(env['OD_LOGDIR']) / 'production_job.generated.sh'
+    result = subprocess.run(['bash', '-c', job.read_text().split('set -uo pipefail')[0] + '\nprintf "%s" "$' + variable + '"'], capture_output=True, text=True, env={}, check=False)
+    assert result.stdout == value

@@ -82,3 +82,25 @@ and [transport socket factory](https://dnspython.readthedocs.io/en/stable/_modul
   findings outside this change; these are not suppressed or reported clean.
 - Metadata preflight: 2,664 source parquet files and the existing SIF are
   present. The upstream source area remains read-only.
+
+- Canary preflight found that `OD_MAX_URLS`, `OD_RETRIES`, and `OD_TIMEOUT`
+  were not frozen into generated jobs. Three executed-shell RED cases each
+  returned an empty setting. Serialize all three, preserving existing job
+  defaults (unlimited, two retries, ten seconds) when not specified.
+
+## First canary protocol (registered before execution)
+
+Use one whole node, task 434 capped to the first 1,000 source URLs, an isolated
+output directory, four processes/eight threads, 10,000 samples/shard, timeout
+10 seconds, two retries, required DNS budget on, old DNS cache off, HTTP pool
+on. Preserve face blurring (`OD_BLUR_FACES=1`): the last successful command
+contains `--bbox_col face_bboxes`. One source shard means
+this pilot primarily tests correctness; do not extrapolate full-task throughput.
+Use the exact CI-published image digest and committed source. Require exit zero,
+exactly 1,000 candidate records, the existing unmodified production health gate,
+a partial DONE marker, and `settings.dns_budget=1`. Record source/image IDs,
+success/failure counts and wall time. Failure means investigate, not scale up.
+After success, validate/retry incomplete production tasks in waves of at most
+four, with fresh scheduler and quota checks before each wave.
+
+- Canary-setting GREEN: all 48 submission CLI tests pass (2.91 s).
