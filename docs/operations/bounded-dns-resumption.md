@@ -293,3 +293,67 @@ successes, 267,945 DNS failures) and 23 newly written shards (230,000 candidates
 dominated by old DNS-degraded shards. Keep this task incomplete; do not lower
 the gate or blindly retry the identical reuse plan. Preserve good shards while
 investigating targeted recovery of the degraded portion.
+
+## First verified full completion: 2026-10-04 12:20 UTC
+
+Task 348 completed with PBS exit 0 after 3:20:41. Its DONE marker matches task
+348 and the full 1,000,000 planned candidates, has `partial=false`, records
+551,287 successes and `settings.dns_budget=1`. The unchanged health gate passed:
+yield 55.1287%, DNS fraction 19.2802%, unreachable fraction 0.1581%, 100 shards.
+These totals include reused shards; they are not all newly downloaded records.
+
+Tasks 346 and 347 completed their download passes but exited 1 at the health
+gate, without DONE markers. Separating stats by the new attempt's start time:
+
+| Task | Portion | Candidates | Successes | DNS failures |
+|---|---|---:|---:|---:|
+| 346 | reused | 770,000 | 352,269 | 267,945 |
+| 346 | newly written | 230,000 | 144,354 | 14,821 |
+| 347 | reused | 690,000 | 309,795 | 248,474 |
+| 347 | newly written | 310,000 | 194,967 | 19,875 |
+
+The approximately 6.4% DNS fractions in the new portions contrast with the
+much worse reused portions. Do not lower the health gate or retry the same
+reuse plan indefinitely. Keep good shards and investigate targeted recovery
+of DNS-degraded history. Neither failed task is counted as completed.
+
+Task 173 remained running with unchanged output; the HTTP body correction is
+in PR #57, whose updated CI passed. At this observation, merge approval was
+still pending; a scheduled heartbeat was not treated as approval. Task 379 was submitted after
+346 ended. Fresh quota and scheduler checks before filling the next two slots
+showed 1,181 / 10,000 TiB, 168,386,103 / 600,000,000 files and two active account
+jobs. Tasks 380 and 381 were selected as unfinished and unlocked, keeping the
+acquisition cap at four including queued jobs. Private job identities and
+submission events remain in the run directory.
+
+A diagnostic SSH option attempted for task 379 was rejected before job creation:
+a second qsub `-v` replaced the wrapper's required RTYPE. Scheduler inspection
+confirmed no new job. The subsequent submission used the existing working
+arguments without SSH. Diagnostic SSH for task 173's eventual recovery requires
+combining environment variables correctly through a tested wrapper change;
+adding another `-v` is not a valid recovery procedure.
+
+### PR integration update: 2026-10-04
+
+PR #57 was subsequently merged as `d1c97e283fec084599c34f934873b6ec7b452866`.
+PR #58 retains both the HTTP correction/validation record and the full-task
+completion record. This documentation merge does not establish deployment of
+the correction or recovery of task 173.
+
+### PR #58 CI correction: graceful reporting probe shutdown
+
+After resolving the documentation merge, CI failed with 660 passing tests and
+one worker-statistics failure: reported hits and misses both summed to zero.
+This was distinct from the previously fixed line-interleaving race. The probe
+used a Pool context manager, whose exit terminates workers rather than waiting
+for their Python exit callbacks. Atomic output cannot preserve a callback that
+never executes.
+
+RED: registering a 0.2-second exit cleanup in the workers reproduced the same
+`(0, 0)` failure locally. GREEN: explicitly close and join the test pool before
+cleanup, retaining all count/cache assertions and the delayed exit. This tests
+graceful reporting rather than relying on scheduling luck. It does not change
+production shutdown or promise that DNS statistics survive forced termination;
+current production continues to use `OD_DNS_CACHE=0` and `OD_DNS_BUDGET=1`.
+Conflict resolution alone was not proof of CI success. The latest head must
+pass the complete CI workflow before this PR is reported ready.
