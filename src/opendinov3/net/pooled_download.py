@@ -38,6 +38,7 @@ from __future__ import annotations
 import io
 import os
 import threading
+import time
 
 import urllib3
 
@@ -69,7 +70,7 @@ def manager() -> urllib3.PoolManager:
     is thread-safe, and a per-thread manager would pool nothing, since each
     thread takes one URL at a time from a queue that is not host-ordered.
     """
-    global _manager  # noqa: PLW0603 — one pool per process is the point
+    global _manager
     if _manager is None:
         with _manager_lock:
             if _manager is None:
@@ -148,10 +149,12 @@ def download_image(row, timeout, user_agent_token, disallowed_header_directives)
     Same signature, same three-tuple, same meanings: a stream on success, a
     message on failure, never both.
     """
-    import img2dataset.downloader as downloader
+    from img2dataset import downloader
 
     key, url = row
     response = None
+    deadline = time.monotonic() + timeout
+    complete = False
     try:
         response = manager().request(
             "GET", url,
@@ -167,7 +170,29 @@ def download_image(row, timeout, user_agent_token, disallowed_header_directives)
             disallowed_header_directives,
         ):
             return key, None, "Use of image disallowed by X-Robots-Tag directive"
-        return key, io.BytesIO(response.read()), None
+        body = io.BytesIO()
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("HTTP body transfer timed out")
+            # Decode only after network reads finish: a compressed header can
+            # otherwise make read1 loop internally without yielding any bytes.
+            chunk = response.read1(64 * 1024, decode_content=False)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("HTTP body transfer timed out")
+            if not chunk:
+                break
+            body.write(chunk)
+        complete = True
+        body.seek(0)
+        decoded = urllib3.HTTPResponse(
+            body=body,
+            headers={"Content-Encoding": response.headers.get("Content-Encoding", "")},
+            preload_content=False,
+        )
+        try:
+            return key, io.BytesIO(decoded.read()), None
+        finally:
+            decoded.close()
     except Exception as err:  # noqa: BLE001 — reported, exactly as upstream
         return key, None, str(err)
     finally:
@@ -175,6 +200,9 @@ def download_image(row, timeout, user_agent_token, disallowed_header_directives)
         # by a dead response and the next URL for that host opens a new one —
         # reuse would silently never happen.
         if response is not None:
+            # Unread bytes must never be reused as the next response.
+            if not complete and response.length_remaining != 0:
+                response.close()
             response.release_conn()
 
 
@@ -184,6 +212,6 @@ def install() -> None:
     `download_image_with_retry` looks `download_image` up in its module
     globals at call time, so rebinding the attribute is enough.
     """
-    import img2dataset.downloader as downloader
+    from img2dataset import downloader
 
     downloader.download_image = download_image
