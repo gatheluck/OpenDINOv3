@@ -107,3 +107,79 @@ four, with fresh scheduler and quota checks before each wave.
 
 - Final type check also covers the new DNS tests; explicit resolver installation
   assertions narrow optional library state without suppressing diagnostics.
+
+## Live restart outcome: 2026-10-04
+
+PR #54 was merged as `151d53fa8c3ff70d4da74aa02dafc005bfe802cc` and pulled.
+The main-branch CI run passed **657 tests** (three existing deprecation warnings,
+352.92 seconds), all six runtime checks, and published the tested image:
+
+```
+ghcr.io/gatheluck/opendinov3@sha256:4cab3c77d26b4205a2369badb471c9a3e54ecf68c943d10f566820045bb31b5b
+```
+
+The release was staged separately from the existing checkout and payloads.
+Six runtime/dependency files matched the local committed source by SHA256.
+The pulled SIF reported Python 3.12.15 and dnspython 2.8.0; its file hash was
+saved alongside the source commit and OCI digest in the private run directory.
+
+### Canary result
+
+Task 434 ran on one whole node with the pre-registered 1,000-URL cap and settings.
+PBS finished with exit **0** after 3 minutes 4 seconds; downloader wall time was
+174 seconds. Output files totalled 53,617,292 bytes.
+
+| Observation | Result |
+|---|---:|
+| Candidates | 1,000 |
+| Successful records | 617 |
+| Yield | 61.7% |
+| DNS error fraction | 7.2% |
+| Unreachable fraction | 0% |
+| Existing health gate | healthy |
+| DONE partial flag | true (not a completed million-URL task) |
+| DONE settings.dns_budget | 1 |
+
+The DNS error fraction is **not DNS QPS**. The first canary did not export the
+node-local transport attempt counter or capture whole-node wire traffic. The
+50-write/s bound is supported by the transport tests and the deployed source;
+it does not establish a measured total-node DNS rate. Preserve that distinction
+in later reporting. The canary's single shard is not a full-task throughput
+estimate. Its output remains isolated from production.
+
+The first qsub attempt failed before submission while copying its script to
+temporary storage (`Disk quota exceeded`). Redirecting only this run's TMPDIR
+to its dedicated group-area directory allowed submission. The failed attempt,
+recovery and successful job identity are preserved in private logs; no existing
+payloads or unrelated jobs were deleted, modified or cancelled.
+
+### First production wave and continuation
+
+After the canary passed, a fresh quota check showed 1,180 / 10,000 TiB and
+167,487,835 / 600,000,000 files. Six other requested account nodes were present;
+adding four acquisition jobs remained below the 16-node notification threshold
+for the account snapshot. This account snapshot is not proof of all other team
+members' usage; team-wide rules continue to apply independently.
+
+Tasks **173, 346, 347 and 348** were submitted as four separate one-node jobs,
+12 hours each, with four processes/eight threads, the DNS budget enabled, old
+DNS cache disabled, HTTP pooling enabled, two retries and existing face blurring.
+They target the original production task tree and use the tested shard-resume
+logic. All four were observed in **R**, each holding its task lock; no completion
+is claimed yet. Do not submit a second copy while these jobs remain active.
+
+A 30-minute follow-up was enabled in the current chat to check jobs, save logs
+and refill available acquisition slots. The cap includes queued and running
+acquisition jobs. It must inspect actual scheduler state and task completion,
+not infer completion from age or exit alone. Changed code still requires TDD
+and the project's PR/approval process; routine acquisition does not wait for
+another user instruction. The documentation PR does not block running work.
+
+Private records live under
+`${OD_OUT_ROOT}/production/resume-20261004-151d53f/`: `events.jsonl`,
+`source-commit.txt`, `source-hashes.json`, `image-digest.txt`, `image-file.sha256`,
+`canary.env.sh`, `canary-job.txt`, `logs/canary/`, and `logs/wave001/task-*/job.json`.
+These retain real job identities and site configuration; do not copy them into
+this public repository. Append operational events periodically and summarize
+milestones here through a PR. Future waves must keep the four-node cap, inspect
+quota and team use, and investigate failures before retrying.
