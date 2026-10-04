@@ -104,3 +104,6 @@ After success, validate/retry incomplete production tasks in waves of at most
 four, with fresh scheduler and quota checks before each wave.
 
 - Canary-setting GREEN: all 48 submission CLI tests pass (2.91 s).
+
+- Final type check also covers the new DNS tests; explicit resolver installation
+  assertions narrow optional library state without suppressing diagnostics.

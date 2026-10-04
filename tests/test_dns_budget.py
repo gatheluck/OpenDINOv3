@@ -210,6 +210,7 @@ def test_real_resolver_transports_and_errors(tmp_path, mode):
     try:
         dns_budget.install(tmp_path / "budget", qps=20)
         resolver = dns.resolver._resolver
+        assert resolver is not None
         resolver.nameservers = ["127.0.0.1"]
         resolver.port = udp.getsockname()[1]
         resolver.timeout = 0.2
