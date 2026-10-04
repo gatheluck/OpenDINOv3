@@ -183,3 +183,51 @@ These retain real job identities and site configuration; do not copy them into
 this public repository. Append operational events periodically and summarize
 milestones here through a PR. Future waves must keep the four-node cap, inspect
 quota and team use, and investigate failures before retrying.
+
+## Task 173 investigation: 2026-10-04
+
+At approximately 11:00 UTC, task 173 remained in PBS state R after more than
+2 hours, but CPU time had advanced only seconds across successive observations.
+Its task-lock heartbeat remained fresh. The other three acquisition jobs were
+still updating output, so there is no evidence of a campaign-wide outage.
+
+The task reused 99 finished shards and was processing only shard 7. The open
+tar stopped growing at 536,084,480 bytes. A read-only tar header scan found
+18,703 entries, with the last visible entry `000079925.jpg` (601,168 bytes),
+near the end of the 10,000-row shard. The scan ended with `unexpected end of
+data`; an unfinished, buffered tar is not proof of storage corruption. The
+parquet sidecar remained empty and no DONE marker existed. The downloader log
+contained startup messages only. These observations localize the symptom to
+completion of the remaining shard; they do not identify a particular URL or
+worker stack.
+
+### Reproduced timeout limitation, not a confirmed production root cause
+
+`pooled_download.download_image` passes `urllib3.Timeout(total=timeout)` and
+then calls `response.read()` without an application-level transfer deadline.
+A local HTTP server returned 20 bytes at 0.1-second intervals, with a declared
+Content-Length of 20. Against the deployed source and dependency container,
+`download_image(..., timeout=0.3, ...)` returned success after **2.709 seconds**
+(including initial client import/setup). An assertion requiring completion
+within 0.9 seconds failed for the intended reason. The first invocation lacked
+the source mount and failed at import; that is an environment error, not RED.
+No external dataset host was contacted by this reproduction.
+
+This agrees with [urllib3's documented timeout semantics](https://urllib3.readthedocs.io/en/stable/reference/urllib3.util.html):
+read/total timeouts do not bound the complete response when bytes keep arriving.
+The pool uses `block=False`, ruling out waiting for a pool-capacity slot in
+this path. A slow ongoing body is therefore a plausible explanation, but the
+reproduction does **not** establish what the production worker is doing.
+Other waits, image processing, or a lost worker result remain unexcluded.
+
+The running job was submitted without compute-node SSH access enabled.
+[ABCI documents this as disabled by default](https://docs.abci.ai/v3/en/job-execution/).
+Existing logs do not contain thread stacks, and sending a diagnostic signal
+without a registered handler could terminate the process. No such signal,
+blind retry, cancellation, or change to running code was attempted.
+
+Next corrective work should first provide observable worker stack/progress
+information and a tested whole-transfer deadline, preserving DNS pacing,
+face blurring, retry accounting and completed-shard reuse. Such code changes
+need TDD, regression checks and a separate implementation PR; this investigation
+alone is not evidence that a fix has been deployed or the task recovered.
