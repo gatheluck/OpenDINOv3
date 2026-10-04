@@ -44,7 +44,8 @@ the single-node rate went from 162 to 575 URL/s with no change on our side.
 
 ### Ceiling two: the resolver, at 8 nodes
 
-Eight nodes ask the shared resolver for roughly 4,600 names a second. DNS
+The throughput-derived estimate was roughly 4,600 lookups/s at eight
+nodes; no wire-level DNS rate was measured. DNS
 failures went from 6.2% to **76.6%** and yield from 64.0% to **17.4%**.
 `unreachable` did not move — it stayed at 0.1%.
 
@@ -116,8 +117,8 @@ connections.
 ## The resolver ceiling was not ours to spend
 
 On 2026-09-04, with four nodes running and the cache **off**, ABCI asked us
-to stop: our DNS traffic was affecting other users. About 2,300 lookups a
-second, one per image, none reused.
+to stop: our DNS traffic was affecting other users. About 2,300 lookups/s was estimated from throughput,
+assuming one lookup per image; this was not measured DNS traffic.
 
 So the 8-node failure was not the first sign of the limit. It was the point
 at which the damage became ours to see rather than someone else's to absorb.
@@ -128,23 +129,30 @@ at 64% throughout because the cost was landing on other people.
 failure mix says what is happening to us. It says nothing about what we are
 doing to the resource we share.
 
-`od.sh dns` now reports queries per second per node from a finished wave, so
-the next conversation with the site can start from a number.
+2026-10-04 correction: `od.sh dns` reports observed `getaddrinfo` calls
+and application-cache hit fractions from available exit logs, including
+unfinished tasks. These are partial observations, not wire DNS query counts.
+Task-average rates hide bursts and do not verify a DNS QPS limit. See
+[the diagnostic contract](../production.md#observing-name-resolution-api-calls--odsh-dns).
 
 ## What this does not answer
 
 - **Where the ceilings are now.** Both were measured before ABCI's
   mitigation. 8 nodes failed on DNS at the old limit; whether it still does,
   and whether the cache moves it, is the next measurement.
-- **The resolver's capacity.** Bracketed between 2,300 q/s (4 nodes, fine)
-  and 4,600 q/s (8 nodes, saturated). Not narrowed further.
+- **The resolver's capacity.** The former 2,300–4,600 q/s bracket was an
+  inference from throughput, not measured DNS QPS. Four nodes affected other
+  users despite normal yield, so it cannot establish a safe lower bound.
 - **Whether 16 or more nodes is reachable.** Nothing above 8 has been tried
   since the mitigation, and the reservation is shared with other users.
 
 ## How to widen a wave from here
 
-Change one thing, then measure both the rate and the failure mix. The rate
-alone cannot tell the two ceilings apart.
+Any restart or widening first needs to satisfy current site/team operating
+guidance. The following are historical diagnostic signatures, not permission
+to scale. Neither a healthy yield nor the API-call report proves safe shared
+DNS load. Once operation is authorised, vary one setting and record both the
+rate and failure mix.
 
 ```bash
 bash scripts/od.sh assess "$OD_TASK_ROOT/task-NNNNNN"
@@ -154,4 +162,4 @@ bash scripts/od.sh assess "$OD_TASK_ROOT/task-NNNNNN"
 |---|---|
 | `unreachable` climbing | connections — reduce nodes, or turn on `OD_HTTP_POOL` |
 | `DNS` climbing | the resolver — turn on `OD_DNS_CACHE` |
-| both flat, yield ~64% | there is headroom; widen again |
+| both flat, yield ~64% | healthy acquisition; shared-resource headroom is still unverified |

@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
-"""How many names a wave actually asked the resolver for.
+"""Report observed getaddrinfo calls and application-cache effectiveness.
 
   dns_report.py <task root> [--tasks 20]
 
-ABCI stopped a wave because our DNS traffic was affecting other users. The
-answer we owe them is a measurement, not a prediction: `od.sh hosts` says 76%
-of lookups repeat, but the cache is per worker process and a node runs 32 of
-them, so the realised figure is lower by an amount only a run can give.
-
-The quantity they asked about is **queries per second per node** — what
-reaches their resolver — not our hit rate.
-
-A task whose log carries no counts ran without the cache. That is reported as
-unknown rather than zero: zero would be the flattering answer, given to the
-people we owe an honest one.
+Includes unfinished tasks. Exit reports may be missing even when the cache
+was enabled, so coverage is unverified and absent counters are unknown.
+This diagnostic neither measures wire DNS QPS nor enforces a rate limit.
 """
 
 from __future__ import annotations
@@ -25,70 +17,89 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from opendinov3.core import shard_layout as sl  # noqa: E402
-from opendinov3.net import dns_report as dr  # noqa: E402
+from opendinov3.core import shard_layout as sl
+from opendinov3.net import dns_report as dr
+
+
+def activity_time(task: Path) -> float:
+    """Use available evidence, including logs from failed/unfinished tasks."""
+    return max(
+        path.stat().st_mtime
+        for path in (task, task / "DONE.json", task / "img2dataset.log")
+        if path.exists()
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("task_root", type=Path)
-    parser.add_argument("--tasks", type=int, default=20,
-                        help="most recently finished tasks to read")
+    parser.add_argument(
+        "--tasks",
+        type=int,
+        default=20,
+        help="most recently modified tasks to read, including unfinished tasks",
+    )
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
+    if args.tasks <= 0:
+        parser.error("--tasks must be positive")
 
-    finished = [task for task in sl.task_dirs(args.task_root)
-                if (task / "DONE.json").is_file()]
-    if not finished:
-        print(f"no finished tasks under {args.task_root}", file=sys.stderr)
+    tasks = sorted(
+        sl.task_dirs(args.task_root), key=lambda t: (activity_time(t), t.name)
+    )
+    if not tasks:
+        print(f"no tasks under {args.task_root}", file=sys.stderr)
         return 2
-    finished.sort(key=lambda t: (t / "DONE.json").stat().st_mtime)
-    recent = finished[-args.tasks:]
 
-    rows = [(task.name, dr.summarise(task)) for task in recent]
-    measured = [(name, s) for name, s in rows if s.workers]
+    rows = []
+    for task in tasks[-args.tasks :]:
+        summary = dr.summarise(task)
+        rows.append(
+            {
+                "task": task.name,
+                "measurement_status": summary.measurement_status,
+                "reports": summary.reports,
+                "observed_lookups": summary.lookups if summary.reports else None,
+                "observed_resolver_calls": summary.misses if summary.reports else None,
+                "observed_cache_hit_fraction": summary.cache_hit_fraction,
+                "wall_seconds": summary.wall_seconds,
+                "observed_resolver_calls_per_second": summary.observed_resolver_calls_per_second,
+            }
+        )
 
-    print(f"tasks read      : {len(rows)}")
-    print(f"with the cache  : {len(measured)}")
+    payload = {
+        "metric": "getaddrinfo_calls_after_cache_miss",
+        "rate_scope": "task_wall_time_average_of_observed_counts",
+        "coverage": "unverified",
+        "tasks": rows,
+    }
+    print(f"tasks read: {len(rows)}")
+    print("Metric: observed getaddrinfo calls after application-cache misses.")
+    print(
+        "Coverage unverified: exit reports can be lost, including on forced termination."
+    )
+    print("Unknown does not mean cache disabled or zero calls.")
+    print(
+        "Rates are task-wall-time averages of observed counts, not wire DNS QPS or peaks."
+    )
+    print("This report cannot establish compliance with a DNS QPS limit.")
     print()
-    if not measured:
-        print("→ None of these tasks ran with OD_DNS_CACHE=1, so nothing was")
-        print("  measured. This is not the same as making no queries.")
-        return 0
+    for row in rows:
+        calls = row["observed_resolver_calls"]
+        rate = row["observed_resolver_calls_per_second"]
+        hit = row["observed_cache_hit_fraction"]
+        rate_text = "unknown" if rate is None else f"{rate:.1f}"
+        hit_text = "unknown" if hit is None else f"{hit:.1%}"
+        print(
+            f"{row['task']}: {row['measurement_status']}; reports={row['reports']}; "
+            f"observed calls={calls if calls is not None else 'unknown'}; "
+            f"observed calls/s={rate_text}; observed cache hit fraction={hit_text}"
+        )
 
-    print(f"{'task':<16}{'workers':>9}{'lookups':>12}{'queries':>12}"
-          f"{'saved':>8}{'q/s':>9}")
-    for name, s in measured:
-        rate = "—" if s.queries_per_second is None else f"{s.queries_per_second:.1f}"
-        saved = "—" if s.reduction is None else f"{s.reduction:.0%}"
-        print(f"{name:<16}{s.workers:>9,}{s.lookups:>12,}{s.misses:>12,}"
-              f"{saved:>8}{rate:>9}")
-
-    lookups = sum(s.lookups for _, s in measured)
-    queries = sum(s.misses for _, s in measured)
-    rated = [s for _, s in measured if s.queries_per_second is not None]
-    print()
-    print(f"lookups         : {lookups:,}")
-    print(f"queries sent    : {queries:,}")
-    print(f"saved by cache  : {1 - queries / lookups:.1%}" if lookups else "")
-    if rated:
-        per_node = sum(s.queries_per_second for s in rated) / len(rated)
-        print(f"**queries/sec/node**: {per_node:.1f}")
-        print()
-        print(f"At N nodes the resolver sees about {per_node:.0f} x N per second.")
-        print("Without the cache it would be "
-              f"{per_node / (queries / lookups):.0f} x N." if queries else "")
-
+    # Write even if every measurement is unknown, replacing any older report.
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(json.dumps({
-            "tasks": [
-                {"task": name, "workers": s.workers, "lookups": s.lookups,
-                 "queries": s.misses, "reduction": s.reduction,
-                 "queries_per_second": s.queries_per_second}
-                for name, s in measured],
-            "lookups": lookups, "queries": queries,
-        }, indent=1))
+        args.json.write_text(json.dumps(payload, indent=2) + "\n")
         print(f"\nwrote {args.json}")
     return 0
 

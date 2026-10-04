@@ -72,7 +72,8 @@ def _install_dns_cache() -> None:
     # task's img2dataset.log. `od.sh dns` adds them up.
     #
     # This exists because ABCI asked us to stop: any claim about how much we
-    # reduced our load on their resolver has to be measured.
+    # affected API calls needs observations. These exit logs can be lost
+    # on forced termination and do not measure wire DNS traffic.
     atexit.register(lambda: print(dns_cache.report(), file=sys.stderr))
 
 

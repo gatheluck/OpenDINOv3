@@ -31,7 +31,7 @@ usage: od.sh [--dry-run] <subcommand> [args...]
   inspect            what the upstream metadata schema holds
   resolution         how large the images are, before downloading any
   hosts              how much connection reuse this corpus would allow
-  dns                how many names a wave asked the resolver for
+  dns                observed name-resolution API calls and cache effectiveness
   verify             does what arrived match what the metadata claimed
   submit --from N --to M   send one production wave to the queue
   report             does the pilot justify widening the wave

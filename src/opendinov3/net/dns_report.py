@@ -1,24 +1,8 @@
-"""Add up what a task's workers actually asked the resolver.
+"""Summarise observed name-resolution API calls, not DNS packets.
 
-WHY
-
-ABCI asked us to stop a wave because our DNS traffic was affecting other
-users. Any answer we give them has to be measured, not predicted: `od.sh
-hosts` says 76% of lookups repeat, but the cache is per process and a node
-runs 32 of them, so the realised reduction is lower by an amount only a run
-can tell us.
-
-The quantity they asked about is **queries per second per node** — what
-reaches their resolver — not our hit rate.
-
-WHY IT COMES OUT OF THE LOG
-
-The cache lives in each worker, and workers are spawned and recycled every
-five shards, so there is no object left to read when the task ends. Each
-process prints its counts as it exits and the totals are the sum. A task
-whose log has no such lines ran without the cache, which is a different
-statement from having made no queries — reported as unknown rather than
-zero, because zero would flatter us to the people we owe an answer.
+Exit reports cannot prove that every process reported. Even a successful
+DONE marker does not prove counter coverage. Counts and rates therefore
+remain partial observations; a missing report means unknown, not cache off.
 """
 
 from __future__ import annotations
@@ -30,8 +14,9 @@ from pathlib import Path
 
 from . import dns_cache
 
-_LINE = re.compile(rf"^{dns_cache.REPORT_PREFIX} hits=(\d+) misses=(\d+)\s*$",
-                   re.MULTILINE)
+_LINE = re.compile(
+    rf"^{dns_cache.REPORT_PREFIX} hits=(\d+) misses=(\d+)\s*$", re.MULTILINE
+)
 
 
 def parse_line(line: str) -> tuple[int, int] | None:
@@ -41,9 +26,9 @@ def parse_line(line: str) -> tuple[int, int] | None:
 
 @dataclass(frozen=True)
 class Summary:
-    """What one task asked for."""
+    """Counters from available exit reports; process coverage is unverified."""
 
-    workers: int
+    reports: int
     hits: int
     misses: int
     wall_seconds: int | None
@@ -53,23 +38,20 @@ class Summary:
         return self.hits + self.misses
 
     @property
-    def reduction(self) -> float | None:
-        """Share of lookups the resolver never saw.
+    def measurement_status(self) -> str:
+        return "partial" if self.reports else "unknown"
 
-        None when the cache was not running: no reduction was measured, and
-        saying 0% would be as wrong as saying 76%.
-        """
-        if not self.workers or not self.lookups:
+    @property
+    def cache_hit_fraction(self) -> float | None:
+        """Fraction served by the application cache in the observed reports."""
+        if not self.reports or not self.lookups:
             return None
         return self.hits / self.lookups
 
     @property
-    def queries_per_second(self) -> float | None:
-        """The number the site asked about, per node.
-
-        None without a wall time — a rate cannot be invented from a count.
-        """
-        if not self.workers or not self.wall_seconds:
+    def observed_resolver_calls_per_second(self) -> float | None:
+        """Observed getaddrinfo calls divided by task wall time, not peak QPS."""
+        if not self.reports or not self.wall_seconds:
             return None
         return self.misses / self.wall_seconds
 
@@ -83,13 +65,18 @@ def summarise(task_dir: Path) -> Summary:
     marker = task_dir / "DONE.json"
     if marker.is_file():
         try:
-            wall = int(json.loads(marker.read_text()).get("wall_seconds") or 0)
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            wall = None
+            metadata = json.loads(marker.read_text())
+        except (OSError, json.JSONDecodeError):
+            metadata = None
+        value = metadata.get("wall_seconds") if isinstance(metadata, dict) else None
+        # production_task.sh writes positive integer seconds. Reject malformed
+        # values, including bool (an int subclass), instead of inventing a rate.
+        if type(value) is int and value > 0:
+            wall = value
 
     return Summary(
-        workers=len(found),
+        reports=len(found),
         hits=sum(int(h) for h, _ in found),
         misses=sum(int(m) for _, m in found),
-        wall_seconds=wall or None,
+        wall_seconds=wall,
     )

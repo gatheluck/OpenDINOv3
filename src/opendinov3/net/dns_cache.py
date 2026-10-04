@@ -7,8 +7,9 @@ Going from 4 nodes to 8 did not exhaust connections — `unreachable` held at
 yield fell from 64.0% to 17.4%, and the health guard rejected all 71 tasks
 the wave produced.
 
-The arithmetic is plain. At the measured 575 URL/s per node, eight nodes ask
-the shared resolver for about 4,600 names a second, and `od.sh hosts`
+At 575 URL/s per node, the historical estimate was about 4,600 lookups/s
+across eight nodes, assuming one per image (not measured DNS traffic).
+`od.sh hosts`
 measured 500,000 URLs spread over 118,834 hosts. Most of those questions
 have already been answered.
 
@@ -86,8 +87,9 @@ def size() -> int:
 def stats() -> tuple[int, int]:
     """(hits, misses) since install.
 
-    A miss is a question that reached the resolver, which is the quantity the
-    site asked us to reduce. A failed lookup is a miss: it reached them.
+    A miss delegates to the original getaddrinfo, including failed calls.
+    This is not a count of DNS packets: OS caching, local name sources,
+    multiple record types and retries can change the wire traffic.
     """
     with _lock:
         return _hits, _misses

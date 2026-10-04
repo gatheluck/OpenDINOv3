@@ -1,35 +1,18 @@
-"""Contract for knowing how many names we actually asked for.
-
-WHY
-
-ABCI asked us to stop: our DNS traffic was affecting other users. The reply
-has to say how much we reduced it by, and "76% of lookups repeat, so the
-cache should remove them" is a prediction, not a measurement. The cache is
-per process and a node runs 32 of them, so the realised figure is lower by
-an amount nobody has measured.
-
-The number they care about is queries per second per node. That is
-`misses / wall_seconds`, and both come out of a finished task.
-
-WHY IT IS PARSED OUT OF THE LOG
-
-The cache lives in each worker, and workers are spawned and recycled
-(`maxtasksperchild=5`), so there is no shared object to read at the end. Each
-process reports its own counts as it exits; the totals are the sum.
-"""
+"""Counters and summaries describe API calls in available process reports."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from opendinov3.net import dns_cache, dns_report
 
-
 # --------------------------------------------------------------------------
 # The counters
 # --------------------------------------------------------------------------
+
 
 def test_a_hit_and_a_miss_are_counted_separately(monkeypatch) -> None:
     calls = []
@@ -42,9 +25,10 @@ def test_a_hit_and_a_miss_are_counted_separately(monkeypatch) -> None:
     dns_cache.install()
     try:
         import socket
-        socket.getaddrinfo("a.example", 443)   # miss
-        socket.getaddrinfo("a.example", 443)   # hit
-        socket.getaddrinfo("b.example", 443)   # miss
+
+        socket.getaddrinfo("a.example", 443)  # miss
+        socket.getaddrinfo("a.example", 443)  # hit
+        socket.getaddrinfo("b.example", 443)  # miss
 
         assert dns_cache.stats() == (1, 2), dns_cache.stats()
     finally:
@@ -52,8 +36,7 @@ def test_a_hit_and_a_miss_are_counted_separately(monkeypatch) -> None:
 
 
 def test_a_failure_counts_as_a_miss(monkeypatch) -> None:
-    """It reached the resolver, which is what the count is for. Recording it
-    as anything else would understate the load we place on it."""
+    """Failed underlying API calls count even without a successful result."""
     import socket
 
     def resolver(*args, **kwargs):
@@ -83,70 +66,73 @@ def test_the_report_line_has_one_definition() -> None:
 # Adding them up over a task
 # --------------------------------------------------------------------------
 
-def write_task(tmp_path, log: str, wall: int = 100) -> "Path":
+
+def write_task(tmp_path, log: str, wall: int = 100) -> Path:
     task = tmp_path / "task-000000"
     task.mkdir()
     (task / "img2dataset.log").write_text(log)
-    (task / "DONE.json").write_text(json.dumps({
-        "task_id": 0, "wall_seconds": wall, "candidates": 1_000_000,
-        "successes": 640_000}))
+    (task / "DONE.json").write_text(
+        json.dumps(
+            {
+                "task_id": 0,
+                "wall_seconds": wall,
+                "candidates": 1_000_000,
+                "successes": 640_000,
+            }
+        )
+    )
     return task
 
 
-def test_every_worker_is_counted(tmp_path) -> None:
+def test_every_available_report_is_counted(tmp_path) -> None:
     """32 processes, recycled every 5 shards, so a task's log holds many."""
-    lines = "\n".join(dns_cache.report_line(hits=100, misses=50)
-                      for _ in range(40))
+    lines = "\n".join(dns_cache.report_line(hits=100, misses=50) for _ in range(40))
     task = write_task(tmp_path, "downloading...\n" + lines + "\nfinished\n")
 
     summary = dns_report.summarise(task)
 
     assert summary.hits == 4_000
     assert summary.misses == 2_000
-    assert summary.workers == 40
+    assert summary.reports == 40
 
 
-def test_the_number_the_site_asked_about_is_queries_per_second(tmp_path
-                                                               ) -> None:
-    """Not hit rate. What reaches their resolver, per node, per second."""
+def test_observed_api_calls_are_averaged_over_task_wall_time(tmp_path) -> None:
+    """The task average describes observed API calls, not wire DNS traffic."""
     lines = dns_cache.report_line(hits=900, misses=100)
     task = write_task(tmp_path, lines, wall=10)
 
-    assert dns_report.summarise(task).queries_per_second == pytest.approx(10.0)
+    assert dns_report.summarise(
+        task
+    ).observed_resolver_calls_per_second == pytest.approx(10.0)
 
 
-def test_the_reduction_is_reported_against_what_would_have_been_asked(tmp_path
-                                                                      ) -> None:
+def test_cache_hit_fraction_is_computed_from_observed_reports(tmp_path) -> None:
     lines = dns_cache.report_line(hits=760, misses=240)
     task = write_task(tmp_path, lines)
 
-    assert dns_report.summarise(task).reduction == pytest.approx(0.76)
+    assert dns_report.summarise(task).cache_hit_fraction == pytest.approx(0.76)
 
 
-def test_a_task_that_ran_without_the_cache_is_not_reported_as_zero(tmp_path
-                                                                   ) -> None:
-    """No lines means the cache was off, which is a different statement from
-    "it made no queries" — and reporting 0 queries/s to the site would be a
-    lie in the direction that flatters us."""
+def test_a_task_without_reports_is_not_reported_as_zero(tmp_path) -> None:
+    """No lines could mean cache off, lost logs, or forced termination."""
     task = write_task(tmp_path, "downloading...\nfinished\n")
 
     summary = dns_report.summarise(task)
-    assert summary.workers == 0
-    assert summary.queries_per_second is None
-    assert summary.reduction is None
+    assert summary.reports == 0
+    assert summary.observed_resolver_calls_per_second is None
+    assert summary.cache_hit_fraction is None
 
 
 def test_a_task_with_no_wall_time_reports_counts_but_no_rate(tmp_path) -> None:
     task = tmp_path / "task-000001"
     task.mkdir()
-    (task / "img2dataset.log").write_text(
-        dns_cache.report_line(hits=1, misses=1))
+    (task / "img2dataset.log").write_text(dns_cache.report_line(hits=1, misses=1))
 
     summary = dns_report.summarise(task)
     assert summary.misses == 1
-    assert summary.queries_per_second is None
+    assert summary.observed_resolver_calls_per_second is None
 
 
 def test_an_unrelated_log_line_is_not_mistaken_for_a_report(tmp_path) -> None:
     task = write_task(tmp_path, "worker said OD_DNS_CACHE is enabled\n")
-    assert dns_report.summarise(task).workers == 0
+    assert dns_report.summarise(task).reports == 0

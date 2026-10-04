@@ -68,7 +68,7 @@ def child_sees(tmp_path, **env) -> dict:
     probe.write_text(PROBE)
     result = subprocess.run(
         [sys.executable, str(probe)],
-        capture_output=True, text=True,
+        check=False, capture_output=True, text=True,
         env={**os.environ, "PYTHONPATH": str(SRC), **env},
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -139,7 +139,7 @@ def test_a_bad_setting_is_reported_and_does_not_kill_the_worker(tmp_path
     probe = tmp_path / "probe.py"
     probe.write_text(PROBE)
     result = subprocess.run(
-        [sys.executable, str(probe)], capture_output=True, text=True,
+        [sys.executable, str(probe)], check=False, capture_output=True, text=True,
         env={**os.environ, "PYTHONPATH": str(SRC),
              "OD_DNS_CACHE": "1", "OD_DNS_CACHE_TTL": "not-a-number"},
     )
@@ -191,7 +191,7 @@ def test_each_worker_reports_its_counts_as_it_exits(tmp_path) -> None:
     probe = tmp_path / "resolving.py"
     probe.write_text(RESOLVING_PROBE)
     result = subprocess.run(
-        [sys.executable, str(probe)], capture_output=True, text=True,
+        [sys.executable, str(probe)], check=False, capture_output=True, text=True,
         env={**os.environ, "PYTHONPATH": str(SRC), "OD_DNS_CACHE": "1"})
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -217,14 +217,13 @@ def test_each_worker_reports_its_counts_as_it_exits(tmp_path) -> None:
 
 
 def test_nothing_is_reported_when_the_cache_is_off(tmp_path) -> None:
-    """A log without these lines means the cache was not running, and the
-    report must be able to tell that from zero queries."""
+    """Disabled cache emits no counters; the converse cannot be inferred."""
     from opendinov3.net import dns_report
 
     probe = tmp_path / "resolving.py"
     probe.write_text(RESOLVING_PROBE)
     result = subprocess.run(
-        [sys.executable, str(probe)], capture_output=True, text=True,
+        [sys.executable, str(probe)], check=False, capture_output=True, text=True,
         env={**os.environ, "PYTHONPATH": str(SRC), "OD_DNS_CACHE": "0"})
 
     assert result.returncode == 0, result.stderr
