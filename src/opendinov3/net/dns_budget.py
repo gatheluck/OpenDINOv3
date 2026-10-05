@@ -15,6 +15,7 @@ import math
 import os
 import socket
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import cast
 
@@ -48,6 +49,45 @@ class Budget:
             state.flush()
             time.sleep(1 / self.qps)
             return operation()
+
+
+class ResolutionAdmission:
+    """Bound active hostname resolutions across this user's node workers.
+
+    File locks release on process exit. Admission happens before resolve_name
+    starts its A/AAAA lifetime; the transport gate still paces every write.
+    """
+
+    def __init__(self, path, limit=16, wait_seconds=60.0):
+        if limit < 1 or not math.isfinite(wait_seconds) or wait_seconds <= 0:
+            raise ValueError("Invalid DNS admission bounds")
+        self.directory = Path(str(path) + ".admission")
+        self.directory.mkdir(mode=0o700, exist_ok=True)
+        self.limit = limit
+        self.wait_seconds = wait_seconds
+
+    @contextmanager
+    def enter(self):
+        deadline = time.monotonic() + self.wait_seconds
+        while True:
+            for slot in range(self.limit):
+                fd = os.open(self.directory / str(slot),
+                             os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                try:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue
+                    try:
+                        yield
+                    finally:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    return
+                finally:
+                    os.close(fd)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("DNS admission wait exceeded its bound")
+            time.sleep(0.05)
 
 
 class BudgetSocket:
@@ -85,7 +125,14 @@ def install(path, qps=DEFAULT_QPS):
     budget = Budget(path, qps)
     # Validate permissions/state even in a process which never sends a query.
     budget.send(lambda: None)
-    resolver = dns.resolver.Resolver()
+    admission = ResolutionAdmission(path)
+
+    class AdmittedResolver(dns.resolver.Resolver):
+        def resolve_name(self, *args, **kwargs):
+            with admission.enter():
+                return super().resolve_name(*args, **kwargs)
+
+    resolver = AdmittedResolver()
     resolver.cache = dns.resolver.LRUCache(max_size=100_000)
     resolver.timeout = 3
     resolver.lifetime = 30
