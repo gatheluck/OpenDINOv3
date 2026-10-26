@@ -368,3 +368,12 @@ in the corpus so far.
   731 s and 725 s against 0002's 692 s on a different task), so cluster load
   and shard size remain as candidates. It does not affect the comparisons
   the settings were chosen from, only the schedule.
+
+### One-hour jobs for an existing campaign
+
+For the 2026-10-26 team scheduling change, follow
+[the hourly migration procedure](operations/hourly-acquisition.md).
+Repartition only the never-submitted suffix; reducing walltime on existing
+million-candidate tasks alone is not the migration. The generic submitter's
+12-hour default is unchanged: the hourly campaign explicitly sets
+`OD_PROD_WALLTIME=01:00:00` with the new plan.
