@@ -91,3 +91,9 @@ docker run --rm -v "$PWD:/w" -w /w opendinov3:dns-budget \
   tests/test_metadata_partition.py tests/test_production_cli.py \
   tests/test_hourly_profile.py
 ```
+
+## Other corpora
+
+For COYO inventory, explicit face policy and the first-job preparation, see
+[coyo-resume.md](coyo-resume.md). Do not source the DataComp profile for COYO:
+it enables face blurring, but COYO metadata has no face boxes.
