@@ -28,8 +28,8 @@ without a large-memory node.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -134,3 +134,44 @@ def summarise(
         final_task_rows=final,
         urls_per_task=urls_per_task,
     )
+
+
+def repartition_tail(
+    tasks: Sequence[TaskSlice], *, first_task: int, urls_per_task: int
+) -> list[TaskSlice]:
+    """Re-cut an unsubmitted suffix, preserving source offsets and the prefix.
+
+    The caller must verify that no suffix task has been submitted or written.
+    This pure function cannot determine scheduler or output-directory state.
+    """
+    if urls_per_task <= 0 or not 0 <= first_task <= len(tasks):
+        raise ValueError("invalid task boundary or nonpositive task size")
+    for index, task in enumerate(tasks):
+        if task.task_id != index:
+            raise ValueError("task IDs must be contiguous from zero")
+        if task.rows <= 0 or any(start < 0 or end <= start
+                                for _, start, end in task.pieces):
+            raise ValueError("invalid source range")
+        if sum(end - start for _, start, end in task.pieces) != task.rows:
+            raise ValueError("task row count differs from its pieces")
+    result = list(tasks[:first_task])
+    pieces: list[tuple[str, int, int]] = []
+    filled = 0
+    for task in tasks[first_task:]:
+        for path, start, end in task.pieces:
+            offset = start
+            while offset < end:
+                take = min(urls_per_task - filled, end - offset)
+                # Coalesce adjacent pieces so repeated partitioning is stable.
+                if pieces and pieces[-1][0] == path and pieces[-1][2] == offset:
+                    pieces[-1] = (path, pieces[-1][1], offset + take)
+                else:
+                    pieces.append((path, offset, offset + take))
+                offset += take
+                filled += take
+                if filled == urls_per_task:
+                    result.append(TaskSlice(len(result), tuple(pieces), filled))
+                    pieces, filled = [], 0
+    if filled:
+        result.append(TaskSlice(len(result), tuple(pieces), filled))
+    return result

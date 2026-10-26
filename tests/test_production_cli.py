@@ -710,3 +710,27 @@ def test_canary_bounds_survive_submission(tmp_path, variable, value):
     job = Path(env['OD_LOGDIR']) / 'production_job.generated.sh'
     result = subprocess.run(['bash', '-c', job.read_text().split('set -uo pipefail')[0] + '\nprintf "%s" "$' + variable + '"'], capture_output=True, text=True, env={}, check=False)
     assert result.stdout == value
+
+
+def test_hourly_walltime_reaches_submitter_and_settings_reach_job(tmp_path):
+    env = make_env(tmp_path)
+    record = tmp_path / 'submit-argv'
+    stub = tmp_path / 'submitter'
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$RECORD"\n')
+    stub.chmod(0o755)
+    settings = {'OD_PROCESSES': '4', 'OD_THREADS': '32',
+                'OD_SAMPLES_PER_SHARD': '10000', 'OD_BLUR_FACES': '1',
+                'OD_DNS_BUDGET': '1', 'OD_TIMEOUT': '10', 'OD_RETRIES': '2',
+                'OD_MAX_URLS': '0', 'OD_HTTP_POOL': '1', 'OD_DNS_CACHE': '0'}
+    env.update(settings)
+    env.update(OD_PROD_WALLTIME='01:00:00', OD_SUBMIT=str(stub), RECORD=str(record))
+    result = submit(env, '--from', 1, '--to', 1)
+    assert result.returncode == 0, result.stderr
+    argv = record.read_text().splitlines()
+    assert argv[:4] == ['--nodes', '1', '--walltime', '01:00:00']
+    assert argv[-3:] == ['--', '-J', '2-2']
+    job = Path(argv[4]).read_text().split('set -uo pipefail')[0]
+    result = subprocess.run(['bash', '-c', job + '\nenv'],
+                            capture_output=True, text=True, env={})
+    actual = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    assert {key: actual[key] for key in settings} == settings
