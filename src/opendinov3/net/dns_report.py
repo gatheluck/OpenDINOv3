@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,39 @@ from . import dns_cache
 _LINE = re.compile(
     rf"^{dns_cache.REPORT_PREFIX} hits=(\d+) misses=(\d+)\s*$", re.MULTILINE
 )
+
+
+def failure_phases(statuses: dict[str, int]) -> dict[str, int]:
+    """Aggregate final messages without returning URLs or claiming root causes.
+
+    These are final row outcomes, not attempt counts. A read timeout cannot
+    identify server versus network delay; EAI_AGAIN cannot identify a resolver
+    outage versus the workload's admission/transport wait.
+    """
+    counts: Counter[str] = Counter()
+    for message, count in statuses.items():
+        if type(count) is not int or count < 0:
+            raise ValueError("Status counts must be nonnegative integers")
+        cause = message.rsplit("(Caused by ", 1)[-1]
+        http = re.match(r"^HTTP Error (\d{3})(?::|$)", message)
+        if message == "success":
+            category = "success"
+        elif http:
+            category = "http_" + http[1]
+        elif "[Errno -3]" in cause:
+            category = "dns_temporary"
+        elif "[Errno -2]" in cause:
+            category = "dns_name_unknown"
+        elif "ConnectTimeoutError" in cause:
+            category = "connect_timeout"
+        elif "ReadTimeoutError" in cause:
+            category = "read_timeout"
+        elif message == "HTTP body transfer timed out":
+            category = "transfer_deadline"
+        else:
+            category = "other"
+        counts[category] += count
+    return dict(counts)
 
 
 def parse_line(line: str) -> tuple[int, int] | None:

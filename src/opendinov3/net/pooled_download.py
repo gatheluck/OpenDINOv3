@@ -23,9 +23,9 @@ WHAT IS DELIBERATELY UNCHANGED
 
 - The User-Agent still carries img2dataset's token. Operators use it to
   identify and block this traffic, and it is theirs to block.
-- Retries stay off. `retries 0` was chosen by measurement (3.31x the
-  throughput of `retries 2`, for 0.2pt of yield), and a pool that quietly
-  retried would make the arms comparison describe a run that never happened.
+- Internal urllib3 retries stay off. The caller's configured retry count
+  remains authoritative. Temporary DNS and timeout failures wait between
+  attempts; other errors retain upstream's attempt policy.
 - X-Robots-Tag is still parsed by img2dataset's own `is_disallowed`, rather
   than reimplemented here, so a publisher's opt-out cannot drift.
 - Failure messages keep the shapes download_stats matches on: `HTTP Error
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import io
 import os
+import socket
 import threading
 import time
 
@@ -61,6 +62,23 @@ _OK = range(200, 300)
 
 _manager: urllib3.PoolManager | None = None
 _manager_lock = threading.Lock()
+
+
+class _TransientError(str):
+    """An unchanged error message marked from its exception, never URL text."""
+
+
+def _transient_exception(error):
+    if isinstance(error, urllib3.exceptions.MaxRetryError):
+        error = error.reason
+    # NewConnectionError inherits ConnectTimeoutError even for ECONNREFUSED.
+    # Inspect its actual cause before the broad urllib3 timeout base class.
+    if isinstance(error, urllib3.exceptions.NewConnectionError):
+        error = error.__cause__
+    return (
+        isinstance(error, (TimeoutError, urllib3.exceptions.TimeoutError))
+        or isinstance(error, socket.gaierror) and error.errno == socket.EAI_AGAIN
+    )
 
 
 def manager() -> urllib3.PoolManager:
@@ -194,7 +212,8 @@ def download_image(row, timeout, user_agent_token, disallowed_header_directives)
         finally:
             decoded.close()
     except Exception as err:  # noqa: BLE001 — reported, exactly as upstream
-        return key, None, str(err)
+        message = _TransientError(str(err)) if _transient_exception(err) else str(err)
+        return key, None, message
     finally:
         # Returns the socket to the pool. Without it the connection is held
         # by a dead response and the next URL for that host opens a new one —
@@ -206,6 +225,27 @@ def download_image(row, timeout, user_agent_token, disallowed_header_directives)
             response.release_conn()
 
 
+def download_image_with_retry(row, timeout, retries, user_agent_token,
+                              disallowed_header_directives):
+    """Keep upstream's attempt budget, spacing transient network failures.
+
+    No extra HTTP retries are enabled inside urllib3. The delay is bounded
+    at two seconds; the production two-retry policy adds at most 1.5 seconds.
+    Final messages and the tuple contract remain unchanged.
+    """
+    from img2dataset import downloader
+
+    for attempt in range(retries + 1):
+        key, stream, err = downloader.download_image(
+            row, timeout, user_agent_token, disallowed_header_directives,
+        )
+        if stream is not None:
+            return key, stream, err
+        if isinstance(err, _TransientError) and attempt < retries:
+            time.sleep(0.5 * 2 ** min(attempt, 2))
+    return key, None, err
+
+
 def install() -> None:
     """Point img2dataset at this downloader.
 
@@ -214,4 +254,10 @@ def install() -> None:
     """
     from img2dataset import downloader
 
-    downloader.download_image = download_image
+    # This is a runtime module hook, not an assignment between inferred
+    # third-party function types. Integration tests pin both call contracts.
+    for name, handler in {
+        "download_image": download_image,
+        "download_image_with_retry": download_image_with_retry,
+    }.items():
+        setattr(downloader, name, handler)

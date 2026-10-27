@@ -327,11 +327,13 @@ def test_installing_replaces_the_downloader_img2dataset_calls() -> None:
     import img2dataset.downloader as dl
 
     original = dl.download_image
+    original_retry = dl.download_image_with_retry
     try:
         pd.install()
         assert dl.download_image is pd.download_image
     finally:
         dl.download_image = original
+        dl.download_image_with_retry = original_retry
 
 
 def test_slow_body_exceeds_transfer_budget_and_next_request_works(server):
@@ -362,3 +364,34 @@ def test_compressed_body_still_decodes(server):
     _, stream, err = fetch(f"{base}/gzip")
     assert err is None
     assert stream.getvalue() == JPEG
+
+
+def test_real_http_path_recovers_after_temporary_dns_failure(server, monkeypatch):
+    import socket
+
+    from img2dataset import downloader as dl
+
+    base, _ = server
+    original = socket.getaddrinfo
+    calls = []
+    delays = []
+    elapsed = [0.0]
+
+    def sleep(seconds):
+        delays.append(seconds)
+        elapsed[0] += seconds
+
+    def resolve(*args, **kwargs):
+        calls.append(args)
+        if elapsed[0] < 0.5:
+            raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(dl, "download_image", dl.download_image)
+    monkeypatch.setattr(dl, "download_image_with_retry", dl.download_image_with_retry)
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(pd.time, "sleep", sleep)
+    pd.install()
+    key, stream, err = dl.download_image_with_retry((7, base + "/ok.jpg"), 10, 2, None, [])
+    assert key == 7 and err is None and stream.getvalue() == JPEG
+    assert len(calls) == 2 and delays == [0.5]

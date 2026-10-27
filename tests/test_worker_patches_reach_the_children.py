@@ -87,6 +87,34 @@ def test_a_worker_is_untouched_when_nothing_is_asked_for(tmp_path) -> None:
     assert seen["download_image"] == "img2dataset.downloader"
 
 
+def test_spawned_worker_retries_temporary_dns_with_spacing(tmp_path, monkeypatch):
+    probe = '''
+import json, socket, time
+from multiprocessing import get_context
+
+def seen(_):
+    import img2dataset.downloader as dl
+    delays = []
+    attempts = []
+    def fail(*args, **kwargs):
+        attempts.append(1)
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+    socket.getaddrinfo = fail
+    time.sleep = delays.append
+    key, stream, error = dl.download_image_with_retry(
+        (9, "http://retry.invalid/image"), 10, 2, None, [])
+    return {"attempts": len(attempts), "delays": delays,
+            "failed": stream is None, "key": key, "dns": "[Errno -3]" in error}
+
+if __name__ == "__main__":
+    with get_context("spawn").Pool(1) as pool:
+        print(json.dumps(pool.map(seen, [0])[0]))
+'''
+    monkeypatch.setitem(globals(), "PROBE", probe)
+    seen = child_sees(tmp_path, OD_HTTP_POOL="1", OD_DNS_BUDGET="0", OD_DNS_CACHE="0")
+    assert seen == {"attempts": 3, "delays": [.5, 1.], "failed": True, "key": 9, "dns": True}
+
+
 # --------------------------------------------------------------------------
 # On when asked
 # --------------------------------------------------------------------------
