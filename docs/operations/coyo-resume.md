@@ -109,3 +109,8 @@ The preview had no submitter configured and used temporary outputs, so it
 verifies command generation, not reservation-wrapper execution or deployment.
 The local type-check initially lacked pytest; rerun with `uv tool run --with
 pytest ty check` supplies the test dependency rather than suppressing the error.
+
+For the subsequent temporary-DNS/timeout investigation, bounded retry proposal,
+and required comparison before rollout, see
+[transient network failures](transient-network-failures.md). Passing a health
+gate is not evidence that all remaining acquisition failures are unavoidable.
